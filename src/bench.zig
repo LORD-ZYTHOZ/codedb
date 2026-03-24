@@ -15,15 +15,13 @@ fn generateCode(allocator: std.mem.Allocator, num_files: usize, lines_per_file: 
     const rand = prng.random();
 
     const words = [_][]const u8{
-        "fn", "pub", "const", "var", "struct", "enum", "union", "return",
-        "if", "else", "while", "for", "switch", "break", "continue",
-        "try", "catch", "error", "void", "bool", "u8", "u32", "u64",
-        "allocator", "self", "result", "value", "index", "count", "size",
-        "init", "deinit", "append", "remove", "get", "put", "insert",
-        "handleRequest", "processData", "validateInput", "parseConfig",
-        "readFile", "writeOutput", "createBuffer", "destroyBuffer",
-        "AgentRegistry", "FileVersions", "TrigramIndex", "WordIndex",
-        "Explorer", "Store", "Version", "Symbol", "Outline", "Language",
+        "fn",          "pub",      "const",       "var",          "struct",        "enum",          "union",        "return",
+        "if",          "else",     "while",       "for",          "switch",        "break",         "continue",     "try",
+        "catch",       "error",    "void",        "bool",         "u8",            "u32",           "u64",          "allocator",
+        "self",        "result",   "value",       "index",        "count",         "size",          "init",         "deinit",
+        "append",      "remove",   "get",         "put",          "insert",        "handleRequest", "processData",  "validateInput",
+        "parseConfig", "readFile", "writeOutput", "createBuffer", "destroyBuffer", "AgentRegistry", "FileVersions", "TrigramIndex",
+        "WordIndex",   "Explorer", "Store",       "Version",      "Symbol",        "Outline",       "Language",
     };
 
     for (0..num_files) |i| {
@@ -119,7 +117,7 @@ pub fn main() !void {
     const tri_iters: usize = 10_000;
     for (0..tri_iters) |_| {
         for (tri_queries) |q| {
-            const cands = ti.candidates(q);
+            const cands = ti.candidates(q, allocator);
             if (cands) |c| allocator.free(c);
         }
     }
@@ -135,7 +133,7 @@ pub fn main() !void {
     std.debug.print("\n── Bloom Filter Effectiveness ──\n", .{});
     for (tri_queries) |q| {
         // Get candidate count with bloom filtering (current behavior)
-        const bloom_cands = ti.candidates(q);
+        const bloom_cands = ti.candidates(q, allocator);
         const bloom_count = if (bloom_cands) |c| blk: {
             defer allocator.free(c);
             break :blk c.len;
