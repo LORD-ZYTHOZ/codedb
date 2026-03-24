@@ -74,7 +74,26 @@ pub fn build(b: *std.Build) void {
     const bench_run = b.addRunArtifact(bench);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_run.step);
-
     // Make module available so dependents don't need to wire it up manually
     _ = codedb_mod;
+
+    // ── WASM build (for Cloudflare Workers) ──
+    const wasm = b.addExecutable(.{
+        .name = "codedb",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+            }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wasm.rdynamic = true;
+    wasm.entry = .disabled;
+
+    const wasm_step = b.step("wasm", "Build WASM module for Cloudflare Workers");
+    wasm_step.dependOn(&b.addInstallArtifact(wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "../wasm" } },
+    }).step);
 }
