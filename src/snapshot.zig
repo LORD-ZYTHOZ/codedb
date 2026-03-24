@@ -235,7 +235,8 @@ pub fn readSections(path: []const u8, allocator: std.mem.Allocator) !?std.AutoHa
     file.seekBy(44) catch return null; // skip version + flags + git_head
 
     var sc_buf: [4]u8 = undefined;
-    if (file.readAll(&sc_buf) catch return null != 4) return null;
+    const scn = file.readAll(&sc_buf) catch return null;
+    if (scn != 4) return null;
     const section_count = std.mem.readInt(u32, &sc_buf, .little);
 
     var result = std.AutoHashMap(u32, SectionEntry).init(allocator);
@@ -243,7 +244,8 @@ pub fn readSections(path: []const u8, allocator: std.mem.Allocator) !?std.AutoHa
 
     for (0..section_count) |_| {
         var entry_buf: [20]u8 = undefined;
-        if (file.readAll(&entry_buf) catch return null != 20) return null;
+        const en = file.readAll(&entry_buf) catch return null;
+        if (en != 20) return null;
         try result.put(
             std.mem.readInt(u32, entry_buf[0..4], .little),
             .{
@@ -274,4 +276,131 @@ pub fn readSectionBytes(path: []const u8, section_id: SectionId, allocator: std.
         return null;
     }
     return buf;
+}
+
+/// Read the git HEAD stored in a snapshot file header. Returns null if
+/// the file doesn't exist, is invalid, or has an all-zero HEAD.
+pub fn readSnapshotGitHead(path: []const u8) ?[40]u8 {
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+
+    var magic_buf: [4]u8 = undefined;
+    const mn = file.readAll(&magic_buf) catch return null;
+    if (mn != 4) return null;
+    if (!std.mem.eql(u8, &magic_buf, &MAGIC)) return null;
+
+    file.seekBy(4) catch return null; // skip version + flags
+
+    var head_buf: [40]u8 = undefined;
+    const hn = file.readAll(&head_buf) catch return null;
+    if (hn != 40) return null;
+
+    // All zeroes means no git HEAD was stored
+    for (head_buf) |b| {
+        if (b != 0) return head_buf;
+    }
+    return null;
+}
+
+/// Load a snapshot into an Explorer. Populates contents, outlines, and
+/// rebuilds trigram + sparse n-gram indexes from the loaded content.
+/// Returns true on success, false if the snapshot couldn't be loaded.
+pub fn loadSnapshot(
+    snapshot_path: []const u8,
+    explorer: *Explorer,
+    store: *@import("store.zig").Store,
+    allocator: std.mem.Allocator,
+) bool {
+    const file = std.fs.cwd().openFile(snapshot_path, .{}) catch return false;
+    defer file.close();
+
+    // Validate magic
+    var magic_buf: [4]u8 = undefined;
+    const lmn = file.readAll(&magic_buf) catch return false;
+    if (lmn != 4) return false;
+    if (!std.mem.eql(u8, &magic_buf, &MAGIC)) return false;
+
+    // Read section table
+    const sections_opt = readSections(snapshot_path, allocator) catch return false;
+    var sections = sections_opt orelse return false;
+    defer sections.deinit();
+
+    // Load CONTENT section — this is the core data
+    const content_entry = sections.get(@intFromEnum(SectionId.content)) orelse return false;
+
+    const content_file = std.fs.cwd().openFile(snapshot_path, .{}) catch return false;
+    defer content_file.close();
+    content_file.seekTo(content_entry.offset) catch return false;
+
+    var bytes_read: u64 = 0;
+    var file_count: u32 = 0;
+    while (bytes_read < content_entry.length) {
+        // Read path_len(u16)
+        var pl_buf: [2]u8 = undefined;
+        const pln = content_file.readAll(&pl_buf) catch return false;
+        if (pln != 2) break;
+        const path_len = std.mem.readInt(u16, &pl_buf, .little);
+        bytes_read += 2;
+
+        // Read path
+        const path_buf = allocator.alloc(u8, path_len) catch return false;
+        defer allocator.free(path_buf);
+        const prn = content_file.readAll(path_buf) catch return false;
+        if (prn != path_len) break;
+        bytes_read += path_len;
+
+        // Read content_len(u32)
+        var cl_buf: [4]u8 = undefined;
+        const cln = content_file.readAll(&cl_buf) catch return false;
+        if (cln != 4) break;
+        const content_len = std.mem.readInt(u32, &cl_buf, .little);
+        bytes_read += 4;
+
+        // Read content
+        const content = allocator.alloc(u8, content_len) catch return false;
+        defer allocator.free(content);
+        const crn = content_file.readAll(content) catch return false;
+        if (crn != content_len) break;
+        bytes_read += content_len;
+
+        // Index into explorer (this dupes path and content internally)
+        explorer.indexFile(path_buf, content) catch continue;
+
+        // Record in store for sequence tracking
+        const hash = std.hash.Wyhash.hash(0, content);
+        _ = store.recordSnapshot(path_buf, content_len, hash) catch {};
+
+        file_count += 1;
+    }
+
+    // Load frequency table if present
+    if (sections.get(@intFromEnum(SectionId.freq_table))) |freq_entry| {
+        if (freq_entry.length == 256 * 256 * 2) {
+            const index_mod = @import("index.zig");
+            const ft = allocator.create([256][256]u16) catch return file_count > 0;
+            const freq_file = std.fs.cwd().openFile(snapshot_path, .{}) catch return file_count > 0;
+            defer freq_file.close();
+            freq_file.seekTo(freq_entry.offset) catch {
+                allocator.destroy(ft);
+                return file_count > 0;
+            };
+            var row_buf: [256 * 2]u8 = undefined;
+            for (0..256) |a| {
+                if (freq_file.readAll(&row_buf) catch {
+                    allocator.destroy(ft);
+                    return file_count > 0;
+                } != 512) {
+                    allocator.destroy(ft);
+                    return file_count > 0;
+                }
+                for (0..256) |b| {
+                    ft[a][b] = std.mem.readInt(u16, row_buf[b * 2 ..][0..2], .little);
+                }
+            }
+            index_mod.setFrequencyTable(ft);
+            // Note: caller is responsible for tracking ft for cleanup
+        }
+    }
+
+    return file_count > 0;
 }

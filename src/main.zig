@@ -97,37 +97,67 @@ pub fn main() !void {
 
     if (!std.mem.eql(u8, cmd, "mcp")) {
         const git_head = git_mod.getGitHead(abs_root, allocator) catch null;
-        const disk_hdr = TrigramIndex.readDiskHeader(data_dir, allocator) catch null;
-        const heads_match = blk: {
-            const a = git_head orelse break :blk false;
-            const b = (disk_hdr orelse break :blk false).git_head orelse break :blk false;
-            break :blk std.mem.eql(u8, &a, &b);
+
+        // Try loading from codedb.snapshot if it exists and git HEAD matches.
+        const snapshot_path = "codedb.snapshot";
+        const snapshot_loaded = blk: {
+            const snap_head = snapshot_mod.readSnapshotGitHead(snapshot_path) orelse break :blk false;
+            const cur_head = git_head orelse break :blk false;
+            if (!std.mem.eql(u8, &snap_head, &cur_head)) break :blk false;
+            break :blk snapshot_mod.loadSnapshot(snapshot_path, &explorer, &store, allocator);
         };
-        // Load per-project freq table before scan so pairWeight is project-aware.
-        if (index_mod.readFrequencyTable(data_dir, allocator) catch null) |ft| {
-            freq_table_heap = ft;
-            index_mod.setFrequencyTable(ft);
-        }
 
+        if (snapshot_loaded) {
+            // If snapshot loaded a freq table, track it for cleanup
+            if (index_mod.active_pair_freq != &index_mod.default_pair_freq) {
+                // The pointer was heap-allocated by loadSnapshot
+                freq_table_heap = @constCast(index_mod.active_pair_freq);
+            }
+            const t_scan = std.time.nanoTimestamp();
+            var dur_buf: [64]u8 = undefined;
+            const scan_elapsed = std.time.nanoTimestamp() - t_scan;
+            out.p("{s}\xe2\x9c\x93{s} {s}loaded snapshot{s}  {s}{d} files{s}  {s}{s}{s}\n", .{
+                s.green, s.reset,
+                s.bold, s.reset,
+                s.dim, explorer.outlines.count(), s.reset,
+                sty.durationColor(s, scan_elapsed), sty.formatDuration(&dur_buf, scan_elapsed), s.reset,
+            });
+        } else {
+            const disk_hdr = TrigramIndex.readDiskHeader(data_dir, allocator) catch null;
+            const heads_match = blk2: {
+                const a = git_head orelse break :blk2 false;
+                const b = (disk_hdr orelse break :blk2 false).git_head orelse break :blk2 false;
+                break :blk2 std.mem.eql(u8, &a, &b);
+            };
+            // Load per-project freq table before scan so pairWeight is project-aware.
+            if (index_mod.readFrequencyTable(data_dir, allocator) catch null) |ft| {
+                freq_table_heap = ft;
+                index_mod.setFrequencyTable(ft);
+            }
 
+            const t_scan = std.time.nanoTimestamp();
+            try watcher.initialScan(&store, &explorer, root, allocator, heads_match);
+            const scan_elapsed = std.time.nanoTimestamp() - t_scan;
+            var dur_buf: [64]u8 = undefined;
+            out.p("{s}\xe2\x9c\x93{s} {s}indexed{s}  {s}{s}{s}\n", .{
+                s.green, s.reset,
+                s.dim, s.reset,
+                sty.durationColor(s, scan_elapsed), sty.formatDuration(&dur_buf, scan_elapsed), s.reset,
+            });
 
-        const t_scan = std.time.nanoTimestamp();
-        try watcher.initialScan(&store, &explorer, root, allocator, heads_match);
-        const scan_elapsed = std.time.nanoTimestamp() - t_scan;
-        var dur_buf: [64]u8 = undefined;
-        out.p("{s}\xe2\x9c\x93{s} {s}indexed{s}  {s}{s}{s}\n", .{
-            s.green, s.reset,
-            s.dim, s.reset,
-            sty.durationColor(s, scan_elapsed), sty.formatDuration(&dur_buf, scan_elapsed), s.reset,
-        });
-
-        if (heads_match) {
-            // Verify file count then load trigram from disk
-            const current_count = @as(u16, @intCast(@min(explorer.outlines.count(), std.math.maxInt(u16))));
-            if (disk_hdr != null and current_count == disk_hdr.?.file_count) {
-                if (TrigramIndex.readFromDisk(data_dir, allocator)) |loaded| {
-                    explorer.trigram_index.deinit();
-                    explorer.trigram_index = loaded;
+            if (heads_match) {
+                // Verify file count then load trigram from disk
+                const current_count = @as(u16, @intCast(@min(explorer.outlines.count(), std.math.maxInt(u16))));
+                if (disk_hdr != null and current_count == disk_hdr.?.file_count) {
+                    if (TrigramIndex.readFromDisk(data_dir, allocator)) |loaded| {
+                        explorer.trigram_index.deinit();
+                        explorer.trigram_index = loaded;
+                    } else {
+                        explorer.rebuildTrigrams() catch {};
+                        explorer.trigram_index.writeToDisk(data_dir, git_head) catch |err| {
+                            std.log.warn("could not persist trigram index: {}", .{err});
+                        };
+                    }
                 } else {
                     explorer.rebuildTrigrams() catch {};
                     explorer.trigram_index.writeToDisk(data_dir, git_head) catch |err| {
@@ -135,29 +165,23 @@ pub fn main() !void {
                     };
                 }
             } else {
-                explorer.rebuildTrigrams() catch {};
+                // Persist trigram index to disk for fast future startup
                 explorer.trigram_index.writeToDisk(data_dir, git_head) catch |err| {
                     std.log.warn("could not persist trigram index: {}", .{err});
                 };
             }
-        } else {
-            // Persist trigram index to disk for fast future startup
-            explorer.trigram_index.writeToDisk(data_dir, git_head) catch |err| {
-                std.log.warn("could not persist trigram index: {}", .{err});
-            };
-        }
 
-        // If no freq table was loaded, build one from indexed content and
-        // persist for next run.  Streams file-by-file — zero extra memory.
-        if (freq_table_heap == null) {
-            if (explorer.contents.count() > 0) {
-                const ft = index_mod.buildFrequencyTableFromMap(&explorer.contents);
-                index_mod.writeFrequencyTable(&ft, data_dir) catch |err| {
-                    std.log.warn("could not persist frequency table: {}", .{err});
-                };
+            // If no freq table was loaded, build one from indexed content and
+            // persist for next run.  Streams file-by-file — zero extra memory.
+            if (freq_table_heap == null) {
+                if (explorer.contents.count() > 0) {
+                    const ft = index_mod.buildFrequencyTableFromMap(&explorer.contents);
+                    index_mod.writeFrequencyTable(&ft, data_dir) catch |err| {
+                        std.log.warn("could not persist frequency table: {}", .{err});
+                    };
+                }
             }
-        }
-
+        } // end else (no snapshot)
     }
 
 
