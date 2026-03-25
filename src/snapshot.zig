@@ -297,11 +297,7 @@ pub fn readSnapshotGitHead(path: []const u8) ?[40]u8 {
     const hn = file.readAll(&head_buf) catch return null;
     if (hn != 40) return null;
 
-    // All zeroes means no git HEAD was stored
-    for (head_buf) |b| {
-        if (b != 0) return head_buf;
-    }
-    return null;
+    return head_buf;
 }
 
 /// Load a snapshot into an Explorer. Populates contents, outlines, and
@@ -334,6 +330,8 @@ pub fn loadSnapshot(
     defer content_file.close();
     content_file.seekTo(content_entry.offset) catch return false;
 
+    const snap_mtime: i128 = if (content_file.stat() catch null) |s| s.mtime else 0;
+
     var bytes_read: u64 = 0;
     var file_count: u32 = 0;
     while (bytes_read < content_entry.length) {
@@ -365,12 +363,24 @@ pub fn loadSnapshot(
         if (crn != content_len) break;
         bytes_read += content_len;
 
+        // Re-index from disk if file was modified after the snapshot
+        var disk_content: ?[]u8 = null;
+        if (snap_mtime > 0) blk: {
+            const df = std.fs.cwd().openFile(path_buf, .{}) catch break :blk;
+            defer df.close();
+            const ds = df.stat() catch break :blk;
+            if (ds.mtime <= snap_mtime) break :blk;
+            disk_content = df.readToEndAlloc(allocator, 16 * 1024 * 1024) catch break :blk;
+        }
+        defer if (disk_content) |dc| allocator.free(dc);
+        const effective = if (disk_content) |dc| dc else content;
+
         // Index into explorer (this dupes path and content internally)
-        explorer.indexFile(path_buf, content) catch continue;
+        explorer.indexFile(path_buf, effective) catch continue;
 
         // Record in store for sequence tracking
-        const hash = std.hash.Wyhash.hash(0, content);
-        _ = store.recordSnapshot(path_buf, content_len, hash) catch {};
+        const hash = std.hash.Wyhash.hash(0, effective);
+        _ = store.recordSnapshot(path_buf, effective.len, hash) catch {};
 
         file_count += 1;
     }
