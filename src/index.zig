@@ -1134,6 +1134,7 @@ pub const default_pair_freq: [256][256]u16 = blk: {
 /// Active frequency table — points to the comptime default or a runtime
 /// per-project table.  Swap only before indexing starts (not thread-safe).
 pub var active_pair_freq: *const [256][256]u16 = &default_pair_freq;
+var loaded_freq_table: [256][256]u16 = undefined;
 
 
 /// Deterministic weight for a character pair, used to place content-defined
@@ -1150,7 +1151,8 @@ pub fn pairWeight(a: u8, b: u8) u16 {
 
 /// Swap in a custom frequency table.  Call before indexing; not thread-safe.
 pub fn setFrequencyTable(table: *const [256][256]u16) void {
-    active_pair_freq = table;
+    loaded_freq_table = table.*;
+    active_pair_freq = &loaded_freq_table;
 }
 
 /// Revert to the built-in comptime frequency table.

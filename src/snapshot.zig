@@ -400,11 +400,11 @@ pub fn loadSnapshot(
                 }
             }
             index_mod.setFrequencyTable(ft);
-            // Note: caller is responsible for tracking ft for cleanup
+            allocator.destroy(ft);
         }
     }
 
-    return file_count > 0;
+    return true;
 }
 
 
