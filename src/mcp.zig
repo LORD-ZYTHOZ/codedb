@@ -9,7 +9,7 @@ const Store = @import("store.zig").Store;
 const explore_mod = @import("explore.zig");
 const Explorer = explore_mod.Explorer;
 const AgentRegistry = @import("agent.zig").AgentRegistry;
-const Prerender = @import("prerender.zig").Prerender;
+const snapshot_json = @import("snapshot_json.zig");
 const watcher = @import("watcher.zig");
 const edit_mod = @import("edit.zig");
 const idx = @import("index.zig");
@@ -66,7 +66,6 @@ pub fn run(
     store: *Store,
     explorer: *Explorer,
     agents: *AgentRegistry,
-    prerender: *Prerender,
 ) void {
     const stdout = std.fs.File.stdout();
     const stdin = std.fs.File.stdin();
@@ -112,7 +111,7 @@ pub fn run(
         } else if (eql(method, "tools/list")) {
             if (!is_notification) writeResult(alloc, stdout, id, tools_list);
         } else if (eql(method, "tools/call")) {
-            handleCall(alloc, root, stdout, id, store, explorer, agents, prerender);
+            handleCall(alloc, root, stdout, id, store, explorer, agents);
         } else if (eql(method, "ping")) {
             if (!is_notification) writeResult(alloc, stdout, id, "{}");
         } else {
@@ -129,7 +128,6 @@ fn handleCall(
     store: *Store,
     explorer: *Explorer,
     agents: *AgentRegistry,
-    prerender: *Prerender,
 ) void {
     const is_notification = id == null;
 
@@ -163,7 +161,7 @@ fn handleCall(
     defer out.deinit(alloc);
 
     const t0 = std.time.nanoTimestamp();
-    dispatch(alloc, tool, args, &out, store, explorer, agents, prerender);
+    dispatch(alloc, tool, args, &out, store, explorer, agents);
     const elapsed = std.time.nanoTimestamp() - t0;
 
     if (is_notification) return;
@@ -220,7 +218,6 @@ fn dispatch(
     store: *Store,
     explorer: *Explorer,
     agents: *AgentRegistry,
-    prerender: *Prerender,
 ) void {
     switch (tool) {
         .codedb_tree => handleTree(alloc, out, explorer),
@@ -231,11 +228,11 @@ fn dispatch(
         .codedb_hot => handleHot(alloc, args, out, store, explorer),
         .codedb_deps => handleDeps(alloc, args, out, explorer),
         .codedb_read => handleRead(alloc, args, out, explorer),
-        .codedb_edit => handleEdit(alloc, args, out, store, agents),
+        .codedb_edit => handleEdit(alloc, args, out, store, explorer, agents),
         .codedb_changes => handleChanges(alloc, args, out, store),
         .codedb_status => handleStatus(alloc, out, store, explorer),
-        .codedb_snapshot => handleSnapshot(alloc, out, explorer, store, prerender),
-        .codedb_bundle => handleBundle(alloc, args, out, store, explorer, agents, prerender),
+        .codedb_snapshot => handleSnapshot(alloc, out, explorer, store),
+        .codedb_bundle => handleBundle(alloc, args, out, store, explorer, agents),
         .codedb_remote => handleRemote(alloc, args, out),
     }
 }
@@ -508,7 +505,7 @@ fn handleRead(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *s
     }
 }
 
-fn handleEdit(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *std.ArrayList(u8), store: *Store, agents: *AgentRegistry) void {
+fn handleEdit(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *std.ArrayList(u8), store: *Store, explorer: *Explorer, agents: *AgentRegistry) void {
     const path = getStr(args, "path") orelse {
         out.appendSlice(alloc, "error: missing 'path'") catch {};
         return;
@@ -559,7 +556,7 @@ fn handleEdit(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *s
         req.after = @intCast(a);
     }
 
-    const result = edit_mod.applyEdit(alloc, store, agents, req) catch |err| {
+    const result = edit_mod.applyEdit(alloc, store, agents, explorer, req) catch |err| {
         out.appendSlice(alloc, "error: edit failed: ") catch {};
         out.appendSlice(alloc, @errorName(err)) catch {};
         return;
@@ -596,8 +593,8 @@ fn handleStatus(alloc: std.mem.Allocator, out: *std.ArrayList(u8), store: *Store
     }) catch {};
 }
 
-fn handleSnapshot(alloc: std.mem.Allocator, out: *std.ArrayList(u8), explorer: *Explorer, store: *Store, prerender: *Prerender) void {
-    const snap = prerender.getSnapshot(explorer, store, alloc) catch {
+fn handleSnapshot(alloc: std.mem.Allocator, out: *std.ArrayList(u8), explorer: *Explorer, store: *Store) void {
+    const snap = snapshot_json.buildSnapshot(explorer, store, alloc) catch {
         out.appendSlice(alloc, "error: snapshot build failed") catch {};
         return;
     };
@@ -613,7 +610,6 @@ fn handleBundle(
     store: *Store,
     explorer: *Explorer,
     agents: *AgentRegistry,
-    prerender: *Prerender,
 ) void {
     const ops_val = args.get("ops") orelse {
         out.appendSlice(alloc, "error: missing 'ops' argument") catch {};
@@ -674,7 +670,7 @@ fn handleBundle(
         var sub_out: std.ArrayList(u8) = .{};
         defer sub_out.deinit(alloc);
 
-        dispatch(alloc, tool, sub_args, &sub_out, store, explorer, agents, prerender);
+        dispatch(alloc, tool, sub_args, &sub_out, store, explorer, agents);
 
         w.print("--- [{d}] {s} ---\n", .{ i, tool_name }) catch {};
         out.appendSlice(alloc, sub_out.items) catch {};
