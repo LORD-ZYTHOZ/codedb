@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const RING_SIZE = 256;
+const CLOUD_URL = "https://codedb.codegraff.com/telemetry/ingest";
 
 pub const Event = struct {
     ts: i64,
@@ -28,6 +29,8 @@ pub const Telemetry = struct {
     file: ?std.fs.File = null,
     enabled: bool = true,
     buf: [4096]u8 = undefined,
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    path_len: usize = 0,
 
     pub fn init(data_dir: []const u8, allocator: std.mem.Allocator) Telemetry {
         var self = Telemetry{};
@@ -39,6 +42,10 @@ pub const Telemetry = struct {
 
         const path = std.fmt.allocPrint(allocator, "{s}/telemetry.ndjson", .{data_dir}) catch return self;
         defer allocator.free(path);
+        if (path.len <= self.path_buf.len) {
+            @memcpy(self.path_buf[0..path.len], path);
+            self.path_len = path.len;
+        }
         self.file = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return self;
         if (self.file) |f| f.seekFromEnd(0) catch {};
         return self;
@@ -48,6 +55,7 @@ pub const Telemetry = struct {
         if (self.enabled) self.flush();
         if (self.file) |f| f.close();
         self.file = null;
+        self.syncToCloud();
     }
 
     /// Hot path — no allocation, no syscall, no blocking.
@@ -94,6 +102,26 @@ pub const Telemetry = struct {
             f.writeAll(self.buf[0..len]) catch continue;
         }
         self.tail.store(head, .monotonic);
+    }
+
+    /// Fire-and-forget: spawn detached shell to POST ndjson to cloud.
+    /// Runs on shutdown — never blocks the MCP loop.
+    fn syncToCloud(self: *Telemetry) void {
+        if (!self.enabled or self.path_len == 0) return;
+        const path = self.path_buf[0..self.path_len];
+
+        const stat = std.fs.cwd().statFile(path) catch return;
+        if (stat.size == 0) return;
+
+        // Build shell command: POST file, truncate on success
+        var cmd_buf: [2048]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "curl -sf -X POST {s} -H 'Content-Type: application/json' --data-binary @{s} >/dev/null 2>&1 && : > {s}", .{ CLOUD_URL, path, path }) catch return;
+
+        var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, std.heap.page_allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        _ = child.spawn() catch return;
     }
 
     fn formatEvent(self: *Telemetry, ev: *const Event) !usize {
