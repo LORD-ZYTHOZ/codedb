@@ -76,6 +76,7 @@ const FileMap = std.StringHashMap(FileState);
 
 const skip_dirs = [_][]const u8{
     ".git",
+    ".claude",
     ".codedb",
     "node_modules",
     ".zig-cache",
@@ -303,6 +304,9 @@ pub fn incrementalLoop(store: *Store, explorer: *Explorer, queue: *EventQueue, r
     }
 
     while (!shutdown.load(.acquire)) {
+        // Check for muonry edit notifications (instant re-index, no 2s delay)
+        drainNotifyFile(store, explorer, queue, &known, root, backing);
+
         // Poll every 2s — gentle on CPU, fast enough to catch saves
         std.Thread.sleep(2 * std.time.ns_per_s);
 
@@ -455,5 +459,59 @@ fn indexFileContent(explorer: *Explorer, dir: std.fs.Dir, path: []const u8, allo
         try explorer.indexFileSkipTrigram(path, content);
     } else {
         try explorer.indexFile(path, content);
+    }
+}
+
+// ── muonry interop ───────────────────────────────────────────────────────────
+//
+// muonry appends changed file paths to /tmp/codedb-notify after each edit.
+// We drain this file on every poll cycle and re-index the listed files
+// immediately, eliminating the 2s polling delay for muonry-sourced edits.
+
+fn drainNotifyFile(store: *Store, explorer: *Explorer, queue: *EventQueue, known: *FileMap, root: []const u8, alloc: std.mem.Allocator) void {
+    // Atomically read + truncate
+    const notify_path = "/tmp/codedb-notify";
+    const file = std.fs.cwd().openFile(notify_path, .{ .mode = .read_write }) catch return;
+    defer file.close();
+
+    const data = file.readToEndAlloc(alloc, 64 * 1024) catch return;
+    defer alloc.free(data);
+    if (data.len == 0) return;
+
+    // Truncate after reading
+    file.seekTo(0) catch return;
+    std.posix.ftruncate(file.handle, 0) catch return;
+
+    // Re-index each notified path
+    var dir = std.fs.cwd().openDir(root, .{}) catch return;
+    defer dir.close();
+
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        const path = std.mem.trim(u8, line, " \t\r");
+        if (path.len == 0) continue;
+
+        // Make path relative to root if it's absolute
+        const rel = if (std.mem.startsWith(u8, path, root))
+            std.mem.trimLeft(u8, path[root.len..], "/")
+        else
+            path;
+
+        indexFileContent(explorer, dir, rel, alloc, false) catch continue;
+
+        // Update known-file state so incrementalDiff doesn't double-process
+        const stat = dir.statFile(rel) catch continue;
+        const mtime: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms));
+        const hash = hashFile(dir, rel, stat.size) catch continue;
+        if (known.getPtr(rel)) |existing| {
+            existing.mtime = mtime;
+            existing.size = stat.size;
+            existing.hash = hash;
+        }
+
+        // Push event to queue
+        if (FsEvent.init(rel, .modified, store.currentSeq())) |ev| {
+            _ = queue.push(ev);
+        }
     }
 }
