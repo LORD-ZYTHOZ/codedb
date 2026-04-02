@@ -247,7 +247,7 @@ const html =
     \\      <tbody>
     \\        <tr><td>codedb</td><td>20</td><td>12.6k</td><td class="fast">17 ms</td><td>0.85 ms</td></tr>
     \\        <tr><td>merjs</td><td>100</td><td>17.3k</td><td class="fast">16 ms</td><td>0.16 ms</td></tr>
-    \\        <tr><td>openclaw/openclaw</td><td>11,281</td><td>2.29M</td><td class="fast">75 s</td><td>6.66 ms</td></tr>
+    \\        <tr><td>openclaw/openclaw</td><td>11,281</td><td>2.29M</td><td class="fast">2.9 s</td><td>6.66 ms</td></tr>
     \\        <tr><td>vitessio/vitess</td><td>5,028</td><td>2.18M</td><td class="fast">50 s</td><td>9.95 ms</td></tr>
     \\      </tbody>
     \\    </table>
@@ -366,7 +366,7 @@ const html =
     \\new Chart(document.getElementById('tokenChart'),{type:'bar',data:{labels:['codedb','merjs'],datasets:[{label:'codedb MCP',data:[20,20],backgroundColor:'#3b82f6'},{label:'ripgrep/grep',data:[32564,4007],backgroundColor:'#9ca3af'}]},options:{responsive:true,maintainAspectRatio:false,scales:{y:{title:{display:true,text:'tokens',font:{family:'JetBrains Mono',size:11}},grid:{color:'#eee'}}},plugins:{legend:{position:'bottom',labels:{font:{family:'Inter',size:11},usePointStyle:true,pointStyle:'circle'}}}}});
     \\
     \\// Indexing chart
-    \\new Chart(document.getElementById('indexChart'),{type:'bar',data:{labels:['codedb\n20 files','merjs\n100 files','openclaw\n11.3k files','vitess\n5k files'],datasets:[{label:'Cold start',data:[0.017,0.016,75,50],backgroundColor:'#3b82f6'}]},options:{responsive:true,maintainAspectRatio:false,scales:{y:{type:'logarithmic',title:{display:true,text:'seconds (log)',font:{family:'JetBrains Mono',size:11}},grid:{color:'#eee'}}},plugins:{legend:{display:false}}}});
+    \\new Chart(document.getElementById('indexChart'),{type:'bar',data:{labels:['codedb\n20 files','merjs\n100 files','openclaw\n11.3k files','vitess\n5k files'],datasets:[{label:'Cold start',data:[0.017,0.016,2.9,50],backgroundColor:'#3b82f6'}]},options:{responsive:true,maintainAspectRatio:false,scales:{y:{type:'logarithmic',title:{display:true,text:'seconds (log)',font:{family:'JetBrains Mono',size:11}},grid:{color:'#eee'}}},plugins:{legend:{display:false}}}});
     \\
     \\// Speedup chart
     \\new Chart(document.getElementById('speedupChart'),{type:'bar',data:{labels:['Tree','Symbol','Search','Word','Outline','Deps'],datasets:[{label:'MCP vs CLI speedup',data:[1253,549,1340,1404,1143,45],backgroundColor:['#3b82f6','#3b82f6','#3b82f6','#3b82f6','#3b82f6','#60a5fa']}]},options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',scales:{x:{title:{display:true,text:'speedup (x)',font:{family:'JetBrains Mono',size:11}},grid:{color:'#eee'}}},plugins:{legend:{display:false}}}});
