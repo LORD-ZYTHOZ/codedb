@@ -3,7 +3,7 @@ set -euo pipefail
 
 CODEDB="./zig-out/bin/codedb"
 REPOS=(
-  "/Users/rachpradhan/codedb2|codedb2|20 files, 12.6k lines"
+  "/Users/rachpradhan/codedb|codedb|20 files, 12.6k lines"
   "/Users/rachpradhan/merjs|merjs|100 files, 17.3k lines"
   "/Users/rachpradhan/turboAPI|turboAPI|160 files, 41.2k lines"
 )

@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/justrach/codedb2/releases/latest"><img src="https://img.shields.io/github/v/release/justrach/codedb2?style=flat-square&label=version" alt="Release" /></a>
-  <a href="https://github.com/justrach/codedb2/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/codedb2?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/justrach/codedb/releases/latest"><img src="https://img.shields.io/github/v/release/justrach/codedb?style=flat-square&label=version" alt="Release" /></a>
+  <a href="https://github.com/justrach/codedb/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/codedb?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/zig-0.15-f7a41d?style=flat-square" alt="Zig 0.15" />
   <img src="https://img.shields.io/badge/status-alpha-orange?style=flat-square" alt="Alpha" />
-  <a href="https://deepwiki.com/justrach/codedb2"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
+  <a href="https://deepwiki.com/justrach/codedb"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
 </p>
 
 <h1 align="center">codedb</h1>
@@ -73,7 +73,7 @@ Downloads the binary for your platform and auto-registers codedb as an MCP serve
 | Linux ARM64 | `codedb-linux-arm64` | — |
 | Linux x86_64 | `codedb-linux-x86_64` | — |
 
-Or install manually from [GitHub Releases](https://github.com/justrach/codedb2/releases/latest).
+Or install manually from [GitHub Releases](https://github.com/justrach/codedb/releases/latest).
 
 ---
 
@@ -161,7 +161,7 @@ Measured on Apple M4 Pro, 48GB RAM. MCP = pre-indexed warm queries (20 iteration
 
 ### Latency — codedb MCP vs codedb CLI vs ast-grep vs ripgrep vs grep
 
-**codedb2 repo** (20 files, 12.6k lines):
+**codedb repo** (20 files, 12.6k lines):
 
 | Query | codedb MCP | codedb CLI | ast-grep | ripgrep | grep | MCP speedup |
 |-------|-----------|-----------|----------|---------|------|-------------|
@@ -189,7 +189,7 @@ codedb returns structured, relevant results — not raw line dumps. For AI agent
 
 | Repo | codedb MCP | ripgrep / grep | Reduction |
 |------|-----------|---------------|-----------|
-| codedb2 (search `allocator`) | ~20 tokens | ~32,564 tokens | **1,628x fewer** |
+| codedb (search `allocator`) | ~20 tokens | ~32,564 tokens | **1,628x fewer** |
 | merjs (search `allocator`) | ~20 tokens | ~4,007 tokens | **200x fewer** |
 
 ### Indexing Speed
@@ -198,7 +198,7 @@ codedb builds **all** indexes on startup (outlines, trigram, word, dependency gr
 
 | Repo | Files | Lines | Cold start | Per file |
 |------|-------|-------|-----------|----------|
-| codedb2 | 20 | 12.6k | **17 ms** | 0.85 ms |
+| codedb | 20 | 12.6k | **17 ms** | 0.85 ms |
 | merjs | 100 | 17.3k | **16 ms** | 0.16 ms |
 | [openclaw/openclaw](https://github.com/openclaw/openclaw) | 11,281 | 2.29M | **75 s** | 6.66 ms |
 | [vitessio/vitess](https://github.com/vitessio/vitess) | 5,028 | 2.18M | **50 s** | 9.95 ms |
@@ -292,7 +292,7 @@ All threads share a `shutdown: atomic.Value(bool)` for graceful termination.
 
 ## 🔒 Data & Privacy
 
-codedb keeps runtime data local by default. Telemetry, when enabled, is written to `~/.codedb/telemetry.ndjson` on the same machine and is not uploaded automatically.
+codedb collects anonymous usage telemetry to improve the tool. Telemetry is written to `~/.codedb/telemetry.ndjson` and synced to the codedb analytics endpoint on session close. **No source code, file contents, file paths, or search queries are collected** — only aggregate tool call counts, latency, and startup stats.
 
 | Location | Contents | Purpose |
 |----------|----------|---------|
@@ -318,8 +318,8 @@ rm -f codedb.snapshot      # remove snapshot from project
 **Requirements:** Zig 0.15+
 
 ```bash
-git clone https://github.com/justrach/codedb2.git
-cd codedb2
+git clone https://github.com/justrach/codedb.git
+cd codedb
 zig build                              # debug build
 zig build -Doptimize=ReleaseFast       # release build
 zig build test                         # run tests

@@ -1,4 +1,4 @@
-# codedb2 — Agent Instructions
+# codedb — Agent Instructions
 
 ## Project
 
