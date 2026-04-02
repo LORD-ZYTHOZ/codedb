@@ -1,4 +1,4 @@
-# codedb2 Benchmarks
+# codedb Benchmarks
 
 Benchmarked on Apple Silicon (M-series), Zig 0.15.1, macOS.
 
@@ -8,7 +8,7 @@ Time to walk, stat, read, and parse all source files into the in-memory index.
 
 | Codebase | Files | Size | Index Time |
 |---|---|---|---|
-| codedb2 (self) | 16 | 56KB | <50ms |
+| codedb (self) | 16 | 56KB | <50ms |
 | openclaw/openclaw | 7,364 | 128MB | **2.9s** |
 
 Previously 35s on openclaw — reduced by **12x** via:

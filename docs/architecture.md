@@ -1,10 +1,10 @@
-# codedb2 — Architecture & Design
+# codedb — Architecture & Design
 
 A lightweight, zero-dependency code intelligence server written in Zig. Indexes a codebase at startup, watches for changes, and serves structural queries over HTTP and MCP (Model Context Protocol).
 
 ## Overview
 
-codedb2 scans a project directory, builds in-memory indexes (outlines, symbols, trigrams, word index, dependency graph), and exposes them via two interfaces:
+codedb scans a project directory, builds in-memory indexes (outlines, symbols, trigrams, word index, dependency graph), and exposes them via two interfaces:
 
 - **HTTP server** on `:7719` — REST-style JSON API
 - **MCP server** over stdio — JSON-RPC for tool-calling LLMs

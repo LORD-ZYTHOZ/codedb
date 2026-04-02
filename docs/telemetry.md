@@ -1,6 +1,6 @@
 # Telemetry Data Flow
 
-codedb writes local telemetry to `~/.codedb/telemetry.ndjson` unless `CODEDB_NO_TELEMETRY=1` is set. The file is append-only and stays on disk until an operator syncs it.
+codedb writes telemetry to `~/.codedb/telemetry.ndjson` unless `CODEDB_NO_TELEMETRY=1` is set. The file is append-only. On MCP session close, the data is synced to the codedb analytics endpoint (`codedb.codegraff.com/telemetry/ingest`) and the local file is cleared. **No source code, file contents, file paths, or search queries are collected** — only aggregate tool call counts, latency, and startup stats.
 
 The current on-disk format is compact:
 
