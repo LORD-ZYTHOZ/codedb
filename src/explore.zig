@@ -265,8 +265,20 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
         defer self.mu.unlock();
         var iter = self.contents.iterator();
         while (iter.next()) |entry| {
-            try self.trigram_index.indexFile(entry.key_ptr.*, entry.value_ptr.*);
-            try self.sparse_ngram_index.indexFile(entry.key_ptr.*, entry.value_ptr.*);
+            // Skip large files to prevent OOM on large repos
+            if (entry.value_ptr.len > 64 * 1024) continue;
+            self.trigram_index.indexFile(entry.key_ptr.*, entry.value_ptr.*) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    std.log.warn("trigram OOM, skipping remaining files", .{});
+                    return;
+                },
+            };
+            self.sparse_ngram_index.indexFile(entry.key_ptr.*, entry.value_ptr.*) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    std.log.warn("sparse ngram OOM, skipping remaining files", .{});
+                    return;
+                },
+            };
         }
     }
 
