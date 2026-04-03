@@ -117,7 +117,7 @@ pub const Explorer = struct {
     allocator: std.mem.Allocator,
     mu: std.Thread.RwLock = .{},
     root_dir: ?std.fs.Dir = null,
-
+    word_index_built: bool = false,
     pub fn init(allocator: std.mem.Allocator) Explorer {
         return .{
             .outlines = std.StringHashMap(FileOutline).init(allocator),
@@ -265,14 +265,14 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
 
     // Build search indexes.
     if (full_index) {
-        try self.word_index.indexFile(stable_path, content);
+        // Word index is built lazily on first searchWord call to save memory.
+        if (self.word_index_built) {
+            try self.word_index.indexFile(stable_path, content);
+        }
         if (!skip_trigram) {
             try self.trigram_index.indexFile(stable_path, content);
-            try self.sparse_ngram_index.indexFile(stable_path, content);
         } else {
-            // Clean stale trigram/sparse entries if file was previously indexed
             self.trigram_index.removeFile(stable_path);
-            self.sparse_ngram_index.removeFile(stable_path);
         }
     }
 
@@ -294,17 +294,10 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
         defer self.mu.unlock();
         var iter = self.contents.iterator();
         while (iter.next()) |entry| {
-            // Skip large files to prevent OOM on large repos
             if (entry.value_ptr.len > 64 * 1024) continue;
             self.trigram_index.indexFile(entry.key_ptr.*, entry.value_ptr.*) catch |err| switch (err) {
                 error.OutOfMemory => {
                     std.log.warn("trigram OOM, skipping remaining files", .{});
-                    return;
-                },
-            };
-            self.sparse_ngram_index.indexFile(entry.key_ptr.*, entry.value_ptr.*) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    std.log.warn("sparse ngram OOM, skipping remaining files", .{});
                     return;
                 },
             };
@@ -652,6 +645,21 @@ pub fn getTree(self: *Explorer, allocator: std.mem.Allocator, use_color: bool) !
 
     /// Search for a word using the inverted word index. O(1) lookup.
     pub fn searchWord(self: *Explorer, word: []const u8, allocator: std.mem.Allocator) ![]const idx.WordHit {
+        // Build word index lazily on first call
+        if (!self.word_index_built) {
+            self.mu.lock();
+            if (!self.word_index_built) {
+                var iter = self.outlines.keyIterator();
+                while (iter.next()) |key_ptr| {
+                    if (self.readContentForSearch(key_ptr.*, allocator)) |content| {
+                        defer allocator.free(content);
+                        self.word_index.indexFile(key_ptr.*, content) catch {};
+                    }
+                }
+                self.word_index_built = true;
+            }
+            self.mu.unlock();
+        }
         self.mu.lockShared();
         defer self.mu.unlockShared();
         return self.word_index.searchDeduped(word, allocator);

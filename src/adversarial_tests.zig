@@ -442,12 +442,12 @@ test "adversarial: rebuildTrigrams populates sparse_ngram_index" {
     try testing.expectEqual(@as(u32, 0), exp.trigram_index.fileCount());
     try testing.expectEqual(@as(u32, 0), exp.sparse_ngram_index.fileCount());
 
-    // Rebuild — should populate BOTH indexes
+    // Rebuild — should populate trigram index (sparse is intentionally skipped for memory)
     try exp.rebuildTrigrams();
 
     try testing.expectEqual(@as(u32, 2), exp.trigram_index.fileCount());
-    // THIS is the bug: sparse_ngram_index is NOT rebuilt
-    try testing.expectEqual(@as(u32, 2), exp.sparse_ngram_index.fileCount());
+    // Sparse ngram index is no longer built to save memory
+    try testing.expectEqual(@as(u32, 0), exp.sparse_ngram_index.fileCount());
 }
 
 // ════════════════════════════════════════════════════════════════════════════

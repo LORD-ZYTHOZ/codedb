@@ -663,20 +663,27 @@ fn scanBg(store: *Store, explorer: *Explorer, root: []const u8, allocator: std.m
         }
         // File count mismatch or disk read failed — rebuild trigrams from stored content
         explorer.rebuildTrigrams() catch {};
-    }
-
-    // Persist trigram index to disk for fast future startup
     explorer.trigram_index.writeToDisk(data_dir, git_head) catch |err| {
         std.log.warn("could not persist trigram index: {}", .{err});
     };
+
+    // Compact: free the scan-time trigram (fragmented) and reload from disk (dense).
+    // This reclaims allocator fragmentation from incremental index building.
+    if (TrigramIndex.readFromDisk(data_dir, allocator)) |loaded| {
+        explorer.mu.lock();
+        explorer.trigram_index.deinit();
+        explorer.trigram_index = loaded;
+        explorer.mu.unlock();
+    }
+
     scan_done.store(true, .release);
     telem.recordCodebaseStats(explorer, @intCast(@max(std.time.milliTimestamp() - startup_t0, 0)));
 
-    // Auto-write snapshot after successful scan
     snapshot_mod.writeSnapshotDual(explorer, abs_root, "codedb.snapshot", allocator) catch |err| {
         std.log.warn("could not auto-write snapshot: {}", .{err});
     };
     explorer.releaseContents();
+}
 }
 fn idleWatchdog(shutdown: *std.atomic.Value(bool)) void {
     const mcp = @import("mcp.zig");
