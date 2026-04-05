@@ -74,6 +74,7 @@ pub const Language = enum(u8) {
     rust,
     go_lang,
     php,
+    ruby,
     markdown,
     json,
     yaml,
@@ -90,6 +91,7 @@ pub fn detectLanguage(path: []const u8) Language {
     if (std.mem.endsWith(u8, path, ".rs")) return .rust;
     if (std.mem.endsWith(u8, path, ".go")) return .go_lang;
     if (std.mem.endsWith(u8, path, ".php")) return .php;
+    if (std.mem.endsWith(u8, path, ".rb") or std.mem.endsWith(u8, path, ".rake")) return .ruby;
     if (std.mem.endsWith(u8, path, ".md")) return .markdown;
     if (std.mem.endsWith(u8, path, ".json")) return .json;
     if (std.mem.endsWith(u8, path, ".yaml") or std.mem.endsWith(u8, path, ".yml")) return .yaml;
@@ -223,8 +225,17 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
             }
         }
 
+        // Track Ruby =begin/=end block comments
+        if (outline.language == .ruby) {
+            if (in_py_docstring) { // reuse the flag for ruby =begin/=end
+                if (std.mem.eql(u8, trimmed, "=end")) in_py_docstring = false;
+                continue;
+            }
+            if (std.mem.eql(u8, trimmed, "=begin")) { in_py_docstring = true; continue; }
+        }
+
         // Track JS/TS block comments (#113)
-        if (outline.language == .typescript or outline.language == .javascript) {
+        if (outline.language == .typescript or outline.language == .javascript or outline.language == .go_lang) {
             if (in_block_comment) {
                 if (std.mem.indexOf(u8, trimmed, "*/")) |close_pos| {
                     in_block_comment = false;
@@ -249,6 +260,10 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
             try self.parseRustLine(trimmed, line_num, &outline, prev_line_trimmed);
         } else if (outline.language == .php) {
             try self.parsePhpLine(trimmed, line_num, &outline, &php_state);
+        } else if (outline.language == .go_lang) {
+            try self.parseGoLine(trimmed, line_num, &outline);
+        } else if (outline.language == .ruby) {
+            try self.parseRubyLine(trimmed, line_num, &outline);
         }
 
         prev_line_trimmed = trimmed;
@@ -1341,6 +1356,146 @@ pub fn getHotFiles(self: *Explorer, store: *Store, allocator: std.mem.Allocator,
         return null;
     }
 
+    fn parseGoLine(self: *Explorer, line: []const u8, line_num: u32, outline: *FileOutline) !void {
+        const a = self.allocator;
+        // func name( or func (receiver) name(
+        if (startsWith(line, "func ")) {
+            // Skip "func (" for function literals
+            const rest = line[5..];
+            // Method with receiver: func (r *Type) Name(
+            var name_start = rest;
+            if (rest.len > 0 and rest[0] == '(') {
+                // Skip past receiver: find ") "
+                if (std.mem.indexOf(u8, rest, ") ")) |close| {
+                    name_start = rest[close + 2..];
+                }
+            }
+            if (extractIdent(name_start)) |name| {
+                const name_copy = try a.dupe(u8, name);
+                errdefer a.free(name_copy);
+                const detail_copy = try a.dupe(u8, line);
+                errdefer a.free(detail_copy);
+                try outline.symbols.append(a, .{
+                    .name = name_copy,
+                    .kind = .function,
+                    .line_start = line_num,
+                    .line_end = line_num,
+                    .detail = detail_copy,
+                });
+            }
+        } else if (startsWith(line, "type ")) {
+            const rest = line[5..];
+            if (extractIdent(rest)) |name| {
+                const kind: SymbolKind = if (std.mem.indexOf(u8, line, " struct") != null or std.mem.indexOf(u8, line, " interface") != null)
+                    .struct_def
+                else
+                    .constant;
+                const name_copy = try a.dupe(u8, name);
+                errdefer a.free(name_copy);
+                const detail_copy = try a.dupe(u8, line);
+                errdefer a.free(detail_copy);
+                try outline.symbols.append(a, .{
+                    .name = name_copy,
+                    .kind = kind,
+                    .line_start = line_num,
+                    .line_end = line_num,
+                    .detail = detail_copy,
+                });
+            }
+        } else if (startsWith(line, "import ")) {
+            if (extractStringLiteral(line)) |path| {
+                const import_copy = try a.dupe(u8, path);
+                errdefer a.free(import_copy);
+                try outline.imports.append(a, import_copy);
+            }
+            const symbol_copy = try a.dupe(u8, line);
+            errdefer a.free(symbol_copy);
+            try outline.symbols.append(a, .{
+                .name = symbol_copy,
+                .kind = .import,
+                .line_start = line_num,
+                .line_end = line_num,
+            });
+        } else if (startsWith(line, "const ") or startsWith(line, "var ")) {
+            const skip = if (startsWith(line, "const ")) @as(usize, 6) else 4;
+            if (extractIdent(line[skip..])) |name| {
+                const kind: SymbolKind = if (startsWith(line, "const ")) .constant else .variable;
+                const name_copy = try a.dupe(u8, name);
+                errdefer a.free(name_copy);
+                const detail_copy = try a.dupe(u8, line);
+                errdefer a.free(detail_copy);
+                try outline.symbols.append(a, .{
+                    .name = name_copy,
+                    .kind = kind,
+                    .line_start = line_num,
+                    .line_end = line_num,
+                    .detail = detail_copy,
+                });
+            }
+        }
+    }
+
+    fn parseRubyLine(self: *Explorer, line: []const u8, line_num: u32, outline: *FileOutline) !void {
+        const a = self.allocator;
+        if (startsWith(line, "def ")) {
+            if (extractIdent(line[4..])) |name| {
+                const name_copy = try a.dupe(u8, name);
+                errdefer a.free(name_copy);
+                const detail_copy = try a.dupe(u8, line);
+                errdefer a.free(detail_copy);
+                try outline.symbols.append(a, .{
+                    .name = name_copy,
+                    .kind = .function,
+                    .line_start = line_num,
+                    .line_end = line_num,
+                    .detail = detail_copy,
+                });
+            }
+        } else if (startsWith(line, "class ")) {
+            if (extractIdent(line[6..])) |name| {
+                const name_copy = try a.dupe(u8, name);
+                errdefer a.free(name_copy);
+                const detail_copy = try a.dupe(u8, line);
+                errdefer a.free(detail_copy);
+                try outline.symbols.append(a, .{
+                    .name = name_copy,
+                    .kind = .struct_def,
+                    .line_start = line_num,
+                    .line_end = line_num,
+                    .detail = detail_copy,
+                });
+            }
+        } else if (startsWith(line, "module ")) {
+            if (extractIdent(line[7..])) |name| {
+                const name_copy = try a.dupe(u8, name);
+                errdefer a.free(name_copy);
+                const detail_copy = try a.dupe(u8, line);
+                errdefer a.free(detail_copy);
+                try outline.symbols.append(a, .{
+                    .name = name_copy,
+                    .kind = .struct_def,
+                    .line_start = line_num,
+                    .line_end = line_num,
+                    .detail = detail_copy,
+                });
+            }
+        } else if (startsWith(line, "require ") or startsWith(line, "require_relative ")) {
+            if (extractStringLiteral(line)) |path| {
+                const import_copy = try a.dupe(u8, path);
+                errdefer a.free(import_copy);
+                try outline.imports.append(a, import_copy);
+            }
+            const symbol_copy = try a.dupe(u8, line);
+            errdefer a.free(symbol_copy);
+            try outline.symbols.append(a, .{
+                .name = symbol_copy,
+                .kind = .import,
+                .line_start = line_num,
+                .line_end = line_num,
+            });
+        }
+    }
+
 fn rebuildDepsFor(self: *Explorer, path: []const u8, outline: *FileOutline) !void {
     var deps: std.ArrayList([]const u8) = .{};
     errdefer deps.deinit(self.allocator);
@@ -1576,7 +1731,7 @@ pub fn isCommentOrBlank(line: []const u8, language: Language) bool {
     if (trimmed.len == 0) return true;
     return switch (language) {
         .zig, .rust, .go_lang => std.mem.startsWith(u8, trimmed, "//"),
-        .python => std.mem.startsWith(u8, trimmed, "#"),
+        .python, .ruby => std.mem.startsWith(u8, trimmed, "#"),
         .javascript, .typescript, .c, .cpp => std.mem.startsWith(u8, trimmed, "//") or std.mem.startsWith(u8, trimmed, "/*") or std.mem.startsWith(u8, trimmed, "*"),
         else => false,
     };
