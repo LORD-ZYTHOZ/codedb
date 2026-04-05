@@ -337,6 +337,9 @@ pub const TrigramIndex = struct {
         // Phase 1: accumulate masks locally per trigram (no global index writes)
         var local = std.AutoHashMap(Trigram, PostingMask).init(self.allocator);
         defer local.deinit();
+        // Pre-size: a file typically has ~content.len/4 unique trigrams
+        const estimated_unique = @max(@as(u32, 64), @as(u32, @intCast(@min(content.len / 4, 65536))));
+        local.ensureTotalCapacity(estimated_unique) catch {};
 
         if (content.len >= 3) {
             for (0..content.len - 2) |i| {
