@@ -155,6 +155,7 @@ const FilteredWalker = struct {
     name_buffer: std.ArrayList(u8),
     allocator: std.mem.Allocator,
     dir_prefix_len: usize = 0,
+    ignore_patterns: std.ArrayList([]const u8) = .{},
 
     pub const Entry = struct {
         path: []const u8, // relative path — valid until next call to next()
@@ -170,6 +171,19 @@ const FilteredWalker = struct {
             .dir_handle = root,
             .iter = root.iterate(),
         });
+
+        // Load .codedbignore if it exists
+        if (root.readFileAlloc(allocator, ".codedbignore", 64 * 1024)) |content| {
+            defer allocator.free(content);
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            while (lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (trimmed.len == 0 or trimmed[0] == '#') continue;
+                const duped = try allocator.dupe(u8, trimmed);
+                try self.ignore_patterns.append(allocator, duped);
+            }
+        } else |_| {}
+
         return self;
     }
 
@@ -179,6 +193,27 @@ const FilteredWalker = struct {
         }
         self.stack.deinit(self.allocator);
         self.name_buffer.deinit(self.allocator);
+        for (self.ignore_patterns.items) |p| self.allocator.free(p);
+        self.ignore_patterns.deinit(self.allocator);
+    }
+
+    fn isIgnored(self: *FilteredWalker, name: []const u8, full_path: []const u8) bool {
+        for (self.ignore_patterns.items) |pattern| {
+            // Directory pattern (ends with /)
+            if (std.mem.endsWith(u8, pattern, "/")) {
+                const dir_name = pattern[0 .. pattern.len - 1];
+                if (std.mem.eql(u8, name, dir_name)) return true;
+            }
+            // Exact name match (matches at any depth)
+            if (std.mem.eql(u8, name, pattern)) return true;
+            // Path prefix match
+            if (std.mem.startsWith(u8, full_path, pattern)) return true;
+            // Glob suffix match (e.g. *.log)
+            if (pattern.len > 1 and pattern[0] == '*') {
+                if (std.mem.endsWith(u8, name, pattern[1..])) return true;
+            }
+        }
+        return false;
     }
 
     pub fn next(self: *FilteredWalker) !?Entry {
@@ -190,7 +225,16 @@ const FilteredWalker = struct {
             if (try top.iter.next()) |entry| {
                 if (entry.kind == .directory) {
                     if (shouldSkipDir(entry.name)) continue;
-
+                    // Check .codedbignore patterns
+                    if (self.ignore_patterns.items.len > 0) {
+                        // Build full path for prefix matching
+                        var check_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const check_path = if (self.dir_prefix_len > 0)
+                            std.fmt.bufPrint(&check_buf, "{s}/{s}", .{ self.name_buffer.items[0..self.dir_prefix_len], entry.name }) catch entry.name
+                        else
+                            entry.name;
+                        if (self.isIgnored(entry.name, check_path)) continue;
+                    }
                     const sub = top.dir_handle.openDir(entry.name, .{ .iterate = true }) catch continue;
 
                     // Extend the directory prefix in name_buffer
@@ -212,6 +256,12 @@ const FilteredWalker = struct {
                 if (self.dir_prefix_len > 0)
                     try self.name_buffer.append(self.allocator, '/');
                 try self.name_buffer.appendSlice(self.allocator, entry.name);
+
+                // Check .codedbignore patterns for files
+                if (self.ignore_patterns.items.len > 0 and self.isIgnored(entry.name, self.name_buffer.items)) {
+                    self.name_buffer.shrinkRetainingCapacity(self.dir_prefix_len);
+                    continue;
+                }
 
                 return .{ .path = self.name_buffer.items };
             } else {
