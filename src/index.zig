@@ -340,10 +340,18 @@ pub const TrigramIndex = struct {
 
         if (content.len >= 3) {
             for (0..content.len - 2) |i| {
+                // Skip trigrams that are pure whitespace (terrible filters, ~12% of all occurrences)
+                const c0 = content[i];
+                const c1 = content[i + 1];
+                const c2 = content[i + 2];
+                if ((c0 == ' ' or c0 == '\t' or c0 == '\n' or c0 == '\r') and
+                    (c1 == ' ' or c1 == '\t' or c1 == '\n' or c1 == '\r') and
+                    (c2 == ' ' or c2 == '\t' or c2 == '\n' or c2 == '\r')) continue;
+
                 const tri = packTrigram(
-                    normalizeChar(content[i]),
-                    normalizeChar(content[i + 1]),
-                    normalizeChar(content[i + 2]),
+                    normalizeChar(c0),
+                    normalizeChar(c1),
+                    normalizeChar(c2),
                 );
                 const gop = try local.getOrPut(tri);
                 if (!gop.found_existing) {
@@ -416,48 +424,46 @@ pub fn candidates(self: *TrigramIndex, query: []const u8, allocator: std.mem.All
         return allocator.alloc([]const u8, 0) catch null;
     }
 
-    // Find the smallest posting list for intersection
-    var min_idx: usize = 0;
-    var min_count = sets.items[0].items.items.len;
-    for (sets.items[1..], 1..) |set, i| {
-        const c = set.items.items.len;
-        if (c < min_count) {
-            min_count = c;
-            min_idx = i;
+    // Sort posting lists by size (smallest first) for efficient intersection
+    std.mem.sort(*PostingList, sets.items, {}, struct {
+        fn lt(_: void, a: *PostingList, b: *PostingList) bool {
+            return a.items.items.len < b.items.items.len;
         }
+    }.lt);
+
+    // Sorted merge intersection: start with smallest list's doc_ids
+    var result_ids: std.ArrayList(u32) = .{};
+    defer result_ids.deinit(allocator);
+
+    // Seed with doc_ids from smallest posting list
+    result_ids.ensureTotalCapacity(allocator, sets.items[0].items.items.len) catch return null;
+    for (sets.items[0].items.items) |p| {
+        result_ids.appendAssumeCapacity(p.doc_id);
     }
 
-    // Collect unique doc_ids from the smallest set
-    var candidate_ids = std.AutoHashMap(u32, void).init(allocator);
-    defer candidate_ids.deinit();
-    for (sets.items[min_idx].items.items) |p| {
-        candidate_ids.put(p.doc_id, {}) catch return null;
-    }
-
-    // Intersect with all other sets
-    for (sets.items, 0..) |set, i| {
-        if (i == min_idx) continue;
-        var to_remove: std.ArrayList(u32) = .{};
-        defer to_remove.deinit(allocator);
-        var cid_iter = candidate_ids.keyIterator();
-        while (cid_iter.next()) |id_ptr| {
-            if (!set.containsDocId(id_ptr.*)) {
-                to_remove.append(allocator, id_ptr.*) catch return null;
+    // Intersect with each subsequent list (both sorted → merge O(n+m))
+    for (sets.items[1..]) |set| {
+        var write: usize = 0;
+        var si: usize = 0;
+        const set_items = set.items.items;
+        for (result_ids.items) |id| {
+            // Advance set pointer to >= id
+            while (si < set_items.len and set_items[si].doc_id < id) : (si += 1) {}
+            if (si < set_items.len and set_items[si].doc_id == id) {
+                result_ids.items[write] = id;
+                write += 1;
+                si += 1;
             }
         }
-        for (to_remove.items) |id| {
-            _ = candidate_ids.remove(id);
-        }
+        result_ids.items.len = write;
+        if (write == 0) break; // early exit if intersection is empty
     }
 
     var result: std.ArrayList([]const u8) = .{};
     errdefer result.deinit(allocator);
-    result.ensureTotalCapacity(allocator, candidate_ids.count()) catch return null;
+    result.ensureTotalCapacity(allocator, result_ids.items.len) catch return null;
 
-    var cand_iter = candidate_ids.keyIterator();
-    next_cand: while (cand_iter.next()) |id_ptr| {
-        const doc_id = id_ptr.*;
-
+    next_cand: for (result_ids.items) |doc_id| {
         // Bloom-filter check for consecutive trigram pairs
         if (tri_count >= 2) {
             for (0..tri_count - 1) |j| {
