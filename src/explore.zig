@@ -206,6 +206,7 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
     var php_state: PhpParseState = .{};
     var in_py_docstring = false;
     var in_block_comment = false;
+    var in_go_import_block = false;
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         line_num += 1;
@@ -261,7 +262,28 @@ fn indexFileInner(self: *Explorer, path: []const u8, content: []const u8, full_i
         } else if (outline.language == .php) {
             try self.parsePhpLine(trimmed, line_num, &outline, &php_state);
         } else if (outline.language == .go_lang) {
-            try self.parseGoLine(trimmed, line_num, &outline);
+            // Handle Go import block: import ( "fmt" \n "net/http" )
+            if (in_go_import_block) {
+                if (std.mem.eql(u8, trimmed, ")")) {
+                    in_go_import_block = false;
+                } else if (extractStringLiteral(trimmed)) |imp_path| {
+                    const import_copy = try self.allocator.dupe(u8, imp_path);
+                    errdefer self.allocator.free(import_copy);
+                    try outline.imports.append(self.allocator, import_copy);
+                    const symbol_copy = try self.allocator.dupe(u8, trimmed);
+                    errdefer self.allocator.free(symbol_copy);
+                    try outline.symbols.append(self.allocator, .{
+                        .name = symbol_copy,
+                        .kind = .import,
+                        .line_start = line_num,
+                        .line_end = line_num,
+                    });
+                }
+            } else if (std.mem.eql(u8, trimmed, "import (")) {
+                in_go_import_block = true;
+            } else {
+                try self.parseGoLine(trimmed, line_num, &outline);
+            }
         } else if (outline.language == .ruby) {
             try self.parseRubyLine(trimmed, line_num, &outline);
         }
@@ -1386,10 +1408,7 @@ pub fn getHotFiles(self: *Explorer, store: *Store, allocator: std.mem.Allocator,
         } else if (startsWith(line, "type ")) {
             const rest = line[5..];
             if (extractIdent(rest)) |name| {
-                const kind: SymbolKind = if (std.mem.indexOf(u8, line, " struct") != null or std.mem.indexOf(u8, line, " interface") != null)
-                    .struct_def
-                else
-                    .constant;
+                const kind: SymbolKind = .struct_def;
                 const name_copy = try a.dupe(u8, name);
                 errdefer a.free(name_copy);
                 const detail_copy = try a.dupe(u8, line);
@@ -1438,7 +1457,12 @@ pub fn getHotFiles(self: *Explorer, store: *Store, allocator: std.mem.Allocator,
     fn parseRubyLine(self: *Explorer, line: []const u8, line_num: u32, outline: *FileOutline) !void {
         const a = self.allocator;
         if (startsWith(line, "def ")) {
-            if (extractIdent(line[4..])) |name| {
+            // Handle "def self.method_name" — skip past "self."
+            var name_start = line[4..];
+            if (startsWith(name_start, "self.")) {
+                name_start = name_start[5..];
+            }
+            if (extractRubyMethodName(name_start)) |name| {
                 const name_copy = try a.dupe(u8, name);
                 errdefer a.free(name_copy);
                 const detail_copy = try a.dupe(u8, line);
@@ -2093,6 +2117,23 @@ fn extractIdent(s: []const u8) ?[]const u8 {
         if (std.ascii.isAlphanumeric(ch) or ch == '_') {
             end += 1;
         } else break;
+    }
+    return if (end > 0) s[0..end] else null;
+}
+
+/// Extract a Ruby method name — supports trailing ?, !, = characters
+fn extractRubyMethodName(s: []const u8) ?[]const u8 {
+    const max_len: usize = 256;
+    var end: usize = 0;
+    for (s) |ch| {
+        if (end >= max_len) break;
+        if (std.ascii.isAlphanumeric(ch) or ch == '_') {
+            end += 1;
+        } else break;
+    }
+    if (end > 0 and end < s.len) {
+        const suffix = s[end];
+        if (suffix == '?' or suffix == '!' or suffix == '=') end += 1;
     }
     return if (end > 0) s[0..end] else null;
 }
