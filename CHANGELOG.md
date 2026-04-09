@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.56 - 2026-04-09
+
+`0.2.56` is a release hotfix for the installer and self-update path after the manual `0.2.55` release.
+
+### Hotfixes
+
+- The install script now resolves the latest version from GitHub Releases first, then falls back to `codedb.codegraff.com/latest.json` only if GitHub is unavailable.
+- `codedb update` now uses the same GitHub-first version lookup, avoiding stale release metadata during post-release propagation windows.
+- The install worker lowers `/latest.json` cache lifetime from 5 minutes to 1 minute and updates its fallback version to `0.2.56`.
+
 ## 0.2.55 - 2026-04-09
 
 `0.2.55` is a performance and reliability release focused on warm reopen, MCP startup behavior, search quality, parser correctness, and installer safety. The headline change is that warm CLI and MCP project loads now reopen persisted state directly instead of spending seconds rebuilding heap indexes.

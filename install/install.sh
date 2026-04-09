@@ -8,6 +8,24 @@ INSTALL_DIR="${CODEDB_DIR:-$HOME/bin}"
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m'
 C='\033[0;36m' W='\033[1;37m' D='\033[0;90m' N='\033[0m'
 
+fetch_latest_version() {
+  local version=""
+
+  version="$(curl -fsSL -A 'codedb-installer' \
+    "https://api.github.com/repos/justrach/codedb/releases/latest" 2>/dev/null \
+    | grep -oE '"tag_name"\s*:\s*"v[^"]*"' \
+    | cut -d'"' -f4 \
+    | sed 's/^v//')" || true
+
+  if [ -z "$version" ]; then
+    version="$(curl -fsSL -A 'codedb-installer' "$BASE_URL/latest.json" 2>/dev/null \
+      | grep -oE '"version"\s*:\s*"[^"]*"' \
+      | cut -d'"' -f4)" || true
+  fi
+
+  printf '%s' "$version"
+}
+
 detect_platform() {
   local os arch
   os="$(uname -s)"
@@ -161,7 +179,7 @@ main() {
 
   version="${CODEDB_VERSION:-}"
   if [ -z "$version" ]; then
-    version="$(curl -fsSL -A 'codedb-installer' "$BASE_URL/latest.json" | grep -oE '"version"\s*:\s*"[^"]*"' | cut -d'"' -f4)"
+    version="$(fetch_latest_version)"
   fi
   if [ -z "$version" ]; then
     printf "  ${R}error: could not fetch latest version${N}\n" >&2

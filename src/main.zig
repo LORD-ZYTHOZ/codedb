@@ -91,7 +91,7 @@ fn mainImpl() !void {
 
     // Handle --version early (no root needed)
     if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "version")) {
-        out.p("codedb 0.2.55\n", .{});
+        out.p("codedb 0.2.56\n", .{});
         return;
     }
 
@@ -117,7 +117,14 @@ fn mainImpl() !void {
                 \\  linux-aarch64) BIN="codedb-linux-aarch64" ;;
                 \\  *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
                 \\esac
-                \\VERSION=$(curl -fsSL https://codedb.codegraff.com/latest.json | grep -oE '"version"\s*:\s*"[^"]*"' | cut -d'"' -f4)
+                \\VERSION=$(curl -fsSL https://api.github.com/repos/justrach/codedb/releases/latest 2>/dev/null | grep -oE '"tag_name"\s*:\s*"v[^"]*"' | cut -d'"' -f4 | sed 's/^v//')
+                \\if [ -z "$VERSION" ]; then
+                \\  VERSION=$(curl -fsSL https://codedb.codegraff.com/latest.json | grep -oE '"version"\s*:\s*"[^"]*"' | cut -d'"' -f4)
+                \\fi
+                \\if [ -z "$VERSION" ]; then
+                \\  echo "failed to determine latest version" >&2
+                \\  exit 1
+                \\fi
                 \\echo "  latest: v${VERSION}"
                 \\TMP=$(mktemp)
                 \\curl -fsSL "https://github.com/justrach/codedb/releases/download/v${VERSION}/${BIN}" -o "$TMP"
