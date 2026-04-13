@@ -2,6 +2,7 @@ const std = @import("std");
 const compat = @import("compat.zig");
 const Store = @import("store.zig").Store;
 const Explorer = @import("explore.zig").Explorer;
+const TrigramIndex = @import("index.zig").TrigramIndex;
 const explore_mod = @import("explore.zig");
 const git_mod = @import("git.zig");
 pub const EventKind = enum(u8) {
@@ -462,6 +463,86 @@ pub fn initialScanWithWorkerCount(store: *Store, explorer: *Explorer, root: []co
         worker.deinit(allocator);
         workers_committed += 1;
     }
+}
+
+/// Fast scan: walk + parse outlines + build trigrams in one pass.
+/// Avoids re-reading files for trigram build. Returns a TrigramIndex
+/// allocated with the given trigram_alloc (caller owns).
+pub fn initialScanWithTrigrams(
+    store: *Store,
+    explorer: *Explorer,
+    root: []const u8,
+    allocator: std.mem.Allocator,
+    trigram_alloc: std.mem.Allocator,
+) !?*TrigramIndex {
+    var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    defer dir.close();
+
+    var entries = try collectInitialScanEntries(store, dir, allocator, true);
+    defer {
+        for (entries.items) |entry| allocator.free(entry.path);
+        entries.deinit(allocator);
+    }
+    if (entries.items.len == 0) return null;
+
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const n_workers = @max(@as(usize, 1), @min(@as(usize, @intCast(cpu_count)), @min(entries.items.len, 8)));
+
+    // Single-worker fast path
+    var tmp_tri = try trigram_alloc.create(TrigramIndex);
+    tmp_tri.* = TrigramIndex.init(trigram_alloc);
+
+    if (n_workers == 1) {
+        for (entries.items) |entry| {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const parsed = parseInitialScanEntry(root, entry, arena.allocator()) catch null;
+            if (parsed) |file| {
+                explorer.commitParsedFileOwnedOutline(file.path, file.content, file.outline, true, true) catch continue;
+                // Build trigrams from same content — no re-read needed
+                if (file.content.len <= 64 * 1024) {
+                    tmp_tri.indexFile(file.path, file.content) catch {};
+                }
+            }
+        }
+        return tmp_tri;
+    }
+
+    // Multi-worker: parse in parallel, commit + trigram sequentially
+    const workers = try allocator.alloc(WorkerParsedResults, n_workers);
+    var workers_committed: usize = 0;
+    defer {
+        for (workers[workers_committed..]) |*worker| worker.deinit(allocator);
+        allocator.free(workers);
+    }
+    const threads = try allocator.alloc(std.Thread, n_workers);
+    defer allocator.free(threads);
+
+    const chunk_size = entries.items.len / n_workers;
+    const remainder = entries.items.len % n_workers;
+    var offset: usize = 0;
+    for (workers, 0..) |*worker, i| {
+        worker.* = WorkerParsedResults.init(std.heap.page_allocator);
+        const extra: usize = if (i < remainder) 1 else 0;
+        const count = chunk_size + extra;
+        const chunk = entries.items[offset .. offset + count];
+        offset += count;
+        threads[i] = try std.Thread.spawn(.{}, initialScanWorker, .{ worker, root, chunk });
+    }
+    for (threads) |thread| thread.join();
+
+    for (workers) |*worker| {
+        for (worker.items.items) |file| {
+            explorer.commitParsedFileOwnedOutline(file.path, file.content, file.outline, true, true) catch continue;
+            // Build trigrams from same content — no re-read
+            if (file.content.len <= 64 * 1024) {
+                tmp_tri.indexFile(file.path, file.content) catch {};
+            }
+        }
+        worker.deinit(allocator);
+        workers_committed += 1;
+    }
+    return tmp_tri;
 }
 
 /// Called from main thread to do the initial scan before listening.

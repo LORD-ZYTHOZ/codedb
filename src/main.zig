@@ -223,9 +223,25 @@ fn mainImpl() !void {
             // Only needed for removeFile (incremental re-indexing), not initial scan.
             explorer.word_index.skip_file_words = true;
             if (!needs_word_index) explorer.word_index.enabled = false;
-            // Always skip trigrams during scan — build them after to halve peak RSS.
-            // Trigrams are either loaded from disk (warm) or rebuilt file-by-file (cold).
-            try watcher.initialScan(&store, &explorer, root, allocator, true);
+            // For search: single-pass scan + trigram build (no re-reading files).
+            // For other commands: outline-only scan, trigrams from disk or rebuild.
+            const is_search = std.mem.eql(u8, cmd, "search");
+            if (is_search and !heads_match) {
+                const tmp_tri = try watcher.initialScanWithTrigrams(&store, &explorer, root, allocator, std.heap.c_allocator);
+                if (tmp_tri) |tri| {
+                    tri.writeToDisk(data_dir, git_head) catch {};
+                    tri.deinit();
+                    std.heap.c_allocator.destroy(tri);
+                    if (MmapTrigramIndex.initFromDisk(data_dir, allocator)) |loaded| {
+                        explorer.mu.lock();
+                        explorer.trigram_index.deinit();
+                        explorer.trigram_index = .{ .mmap = loaded };
+                        explorer.mu.unlock();
+                    }
+                }
+            } else {
+                try watcher.initialScan(&store, &explorer, root, allocator, true);
+            }
             const scan_elapsed = std.time.nanoTimestamp() - t_scan;
             var dur_buf: [64]u8 = undefined;
             out.p("{s}\xe2\x9c\x93{s} {s}indexed{s}  {s}{s}{s}\n", .{
@@ -261,8 +277,8 @@ fn mainImpl() !void {
                         std.log.warn("could not persist trigram index: {}", .{err});
                     };
                 }
-            } else {
-                // Cold run: persist word index → free → build trigrams → reload.
+            } else if (!is_search) {
+                // Cold run (non-search): persist word index → free → build trigrams → reload.
                 // This prevents word index + trigram index from coexisting in memory.
                 explorer.releaseContents();
                 if (needs_word_index) persistWordIndexToDisk(&explorer, data_dir, git_head);
