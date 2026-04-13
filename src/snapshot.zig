@@ -83,9 +83,8 @@ pub fn writeSnapshot(
         defer buf.deinit(allocator);
         const writer = buf.writer(allocator);
         var total_bytes: u64 = 0;
-        for (explorer.contents.slots) |*slot| {
-            if (slot.occupied) total_bytes += slot.data.len;
-        }
+        var ct_iter = explorer.contents.valueIterator();
+        while (ct_iter.next()) |v| total_bytes += v.*.len;
         var file_count_meta: u32 = 0;
         var fc_iter = explorer.outlines.keyIterator();
         while (fc_iter.next()) |k| {
@@ -223,19 +222,20 @@ pub fn writeSnapshot(
     // ── Section: CONTENT ──
     {
         const offset = try file.getPos();
-        for (explorer.contents.slots) |*slot| {
-            if (!slot.occupied) continue;
-            const path = slot.path;
+        var ct_iter = explorer.contents.iterator();
+        while (ct_iter.next()) |entry| {
+            const path = entry.key_ptr.*;
+            // Skip sensitive files that may contain secrets
             if (isSensitivePath(path)) continue;
-            const ct = slot.data;
+            const content = entry.value_ptr.*;
             var pl_buf: [2]u8 = undefined;
             std.mem.writeInt(u16, &pl_buf, @intCast(path.len), .little);
             try file.writeAll(&pl_buf);
             try file.writeAll(path);
             var cl_buf: [4]u8 = undefined;
-            std.mem.writeInt(u32, &cl_buf, @intCast(ct.len), .little);
+            std.mem.writeInt(u32, &cl_buf, @intCast(content.len), .little);
             try file.writeAll(&cl_buf);
-            try file.writeAll(ct);
+            try file.writeAll(content);
         }
         const end = try file.getPos();
         try sections.append(allocator, .{ .id = @intFromEnum(SectionId.content), .offset = offset, .length = end - offset });
@@ -680,8 +680,10 @@ fn insertRestoredFile(
     outline_gop.key_ptr.* = path;
     outline_gop.value_ptr.* = restored_outline;
 
-    if (explorer.contents.get(path) != null) return error.InvalidData;
-    explorer.contents.put(path, content);
+    const content_gop = try explorer.contents.getOrPut(path);
+    if (content_gop.found_existing) return error.InvalidData;
+    content_gop.key_ptr.* = path;
+    content_gop.value_ptr.* = content;
 
     try rebuildDepsFromOutline(explorer, path, &restored_outline, allocator);
 }
