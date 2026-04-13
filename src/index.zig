@@ -5,7 +5,7 @@ const compat = @import("compat.zig");
 // Maps word → list of (path, line) hits. O(1) word lookup.
 
 pub const WordHit = struct {
-    path: []const u8,
+    doc_id: u32,
     line_num: u32,
 };
 
@@ -17,12 +17,29 @@ pub const WordIndex = struct {
     file_words: std.StringHashMap([]const []const u8),
     allocator: std.mem.Allocator,
     skip_file_words: bool = false,
+    path_to_id: std.StringHashMap(u32),
+    id_to_path: std.ArrayList([]const u8),
+
+    pub fn hitPath(self: *const WordIndex, hit: WordHit) []const u8 {
+        if (hit.doc_id < self.id_to_path.items.len) return self.id_to_path.items[hit.doc_id];
+        return "";
+    }
+
+    fn getOrCreateDocId(self: *WordIndex, path: []const u8) !u32 {
+        if (self.path_to_id.get(path)) |id| return id;
+        const id: u32 = @intCast(self.id_to_path.items.len);
+        try self.id_to_path.append(self.allocator, path);
+        try self.path_to_id.put(path, id);
+        return id;
+    }
 
     pub fn init(allocator: std.mem.Allocator) WordIndex {
         return .{
             .index = std.StringHashMap(std.ArrayList(WordHit)).init(allocator),
             .file_words = std.StringHashMap([]const []const u8).init(allocator),
             .allocator = allocator,
+            .path_to_id = std.StringHashMap(u32).init(allocator),
+            .id_to_path = .{},
         };
     }
 
@@ -42,6 +59,9 @@ pub const WordIndex = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.file_words.deinit();
+
+        self.path_to_id.deinit();
+        self.id_to_path.deinit(self.allocator);
     }
 
     /// Remove all index entries for a file (call before re-indexing).
@@ -49,12 +69,22 @@ pub const WordIndex = struct {
         const removed = self.file_words.fetchRemove(path) orelse return;
         const stable_path = removed.key;
         const words_slice = removed.value;
+
+        const doc_id = self.path_to_id.get(stable_path) orelse {
+            self.allocator.free(words_slice);
+            self.allocator.free(stable_path);
+            return;
+        };
+        _ = self.path_to_id.remove(stable_path);
+        if (doc_id < self.id_to_path.items.len) {
+            self.id_to_path.items[doc_id] = "";
+        }
         defer {
             self.allocator.free(words_slice);
             self.allocator.free(stable_path);
         }
 
-        // For each word this file contributed, remove hits with this path.
+        // For each word this file contributed, remove hits with this doc_id.
         // Prune empty buckets so churn does not leak key/list entries.
         for (words_slice) |word| {
             const word_ptr = &word;
@@ -62,7 +92,7 @@ pub const WordIndex = struct {
                 const hits = entry.value_ptr;
                 var i: usize = 0;
                 while (i < hits.items.len) {
-                    if (std.mem.eql(u8, hits.items[i].path, stable_path)) {
+                    if (hits.items[i].doc_id == doc_id) {
                         _ = hits.swapRemove(i);
                     } else {
                         i += 1;
@@ -85,6 +115,8 @@ pub const WordIndex = struct {
 
         const stable_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(stable_path);
+
+        const doc_id = try self.getOrCreateDocId(stable_path);
 
         // Use page_allocator-backed arena for words_set — pages are returned
         // to the OS immediately when the arena is deinitialized, instead of
@@ -112,7 +144,7 @@ pub const WordIndex = struct {
 
                 if (gop.value_ptr.items.len > 0) {
                     const last = gop.value_ptr.items[gop.value_ptr.items.len - 1];
-                    if (std.mem.eql(u8, last.path, path) and last.line_num == line_num) {
+                    if (last.doc_id == doc_id and last.line_num == line_num) {
                         // Avoid duplicate hits for repeated words on the same line.
                         const wgop = try words_set.getOrPut(word);
                         if (!wgop.found_existing) wgop.key_ptr.* = gop.key_ptr.*;
@@ -121,7 +153,7 @@ pub const WordIndex = struct {
                 }
 
                 try gop.value_ptr.append(self.allocator, .{
-                    .path = stable_path,
+                    .doc_id = doc_id,
                     .line_num = line_num,
                 });
 
@@ -166,7 +198,7 @@ pub const WordIndex = struct {
             return out;
         }
 
-        const DedupKey = struct { path_ptr: usize, line_num: u32 };
+        const DedupKey = struct { doc_id: u32, line_num: u32 };
         var seen = std.AutoHashMap(DedupKey, void).init(allocator);
         defer seen.deinit();
         try seen.ensureTotalCapacity(@intCast(hits.len));
@@ -176,7 +208,7 @@ pub const WordIndex = struct {
         try result.ensureTotalCapacity(allocator, hits.len);
 
         for (hits) |hit| {
-            const key = DedupKey{ .path_ptr = @intFromPtr(hit.path.ptr), .line_num = hit.line_num };
+            const key = DedupKey{ .doc_id = hit.doc_id, .line_num = hit.line_num };
             const gop = try seen.getOrPut(key);
             if (!gop.found_existing) {
                 result.appendAssumeCapacity(hit);
@@ -280,7 +312,8 @@ pub const WordIndex = struct {
             std.mem.writeInt(u32, &hc_buf, @intCast(hits.items.len), .little);
             try writer.interface.writeAll(&hc_buf);
             for (hits.items) |hit| {
-                const file_id = disk_path_to_id.get(hit.path) orelse return error.InvalidData;
+                const hit_path = self.id_to_path.items[hit.doc_id];
+                const file_id = disk_path_to_id.get(hit_path) orelse return error.InvalidData;
                 var hit_buf: [8]u8 = undefined;
                 std.mem.writeInt(u32, hit_buf[0..4], file_id, .little);
                 std.mem.writeInt(u32, hit_buf[4..8], hit.line_num, .little);
@@ -374,16 +407,15 @@ pub const WordIndex = struct {
                 const line_num = std.mem.readInt(u32, data[pos..][0..4], .little);
                 pos += 4;
 
-                const stable_path = file_paths[file_id];
                 hits.appendAssumeCapacity(.{
-                    .path = stable_path,
+                    .doc_id = file_id,
                     .line_num = line_num,
                 });
 
                 if (last_file_id == null or last_file_id.? != file_id) {
-                    const fw_gop = try tmp_file_words.getOrPut(stable_path);
+                    const fw_gop = try tmp_file_words.getOrPut(file_paths[file_id]);
                     if (!fw_gop.found_existing) {
-                        fw_gop.key_ptr.* = stable_path;
+                        fw_gop.key_ptr.* = file_paths[file_id];
                         fw_gop.value_ptr.* = std.StringHashMap(void).init(allocator);
                         used_paths[file_id] = true;
                     }
@@ -400,6 +432,13 @@ pub const WordIndex = struct {
         }
 
         if (pos != data.len) return null;
+
+        // Populate path_to_id and id_to_path from file_paths
+        try result.id_to_path.ensureTotalCapacity(allocator, file_count);
+        for (0..file_count) |i| {
+            result.id_to_path.appendAssumeCapacity(file_paths[i]);
+            try result.path_to_id.put(file_paths[i], @intCast(i));
+        }
 
         // Compact tmp_file_words HashMaps into slices for result.file_words
         var tfw_iter = tmp_file_words.iterator();

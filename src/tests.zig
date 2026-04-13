@@ -269,7 +269,7 @@ test "word index: index and search" {
 
     const hits = wi.search("hello");
     try testing.expect(hits.len > 0);
-    try testing.expectEqualStrings("src/foo.zig", hits[0].path);
+    try testing.expectEqualStrings("src/foo.zig", wi.hitPath(hits[0]));
     try testing.expect(hits[0].line_num == 1);
 
     // "x" is only 1 char, should be skipped
@@ -832,7 +832,7 @@ test "explorer: searchWord via inverted index" {
     const hits = try explorer.searchWord("add", testing.allocator);
     defer testing.allocator.free(hits);
     try testing.expect(hits.len > 0);
-    try testing.expectEqualStrings("math.zig", hits[0].path);
+    try testing.expectEqualStrings("math.zig", explorer.word_index.hitPath(hits[0]));
 }
 
 test "explorer: removeFile cleans up everything" {
@@ -2948,8 +2948,8 @@ test "disk word index: round-trip write and read preserves hits" {
     var found_main = false;
     var found_store = false;
     for (hits_after) |hit| {
-        if (std.mem.eql(u8, hit.path, "src/main.zig")) found_main = true;
-        if (std.mem.eql(u8, hit.path, "src/store.zig")) found_store = true;
+        if (std.mem.eql(u8, loaded_wi.hitPath(hit), "src/main.zig")) found_main = true;
+        if (std.mem.eql(u8, loaded_wi.hitPath(hit), "src/store.zig")) found_store = true;
     }
     try testing.expect(found_main);
     try testing.expect(found_store);
@@ -3482,12 +3482,12 @@ test "issue-220: partial word index state rebuilds before search" {
     const alpha_hits = try exp2.searchWord("Alpha", testing.allocator);
     defer testing.allocator.free(alpha_hits);
     try testing.expectEqual(@as(usize, 1), alpha_hits.len);
-    try testing.expect(std.mem.eql(u8, alpha_hits[0].path, "src/a.zig"));
+    try testing.expect(std.mem.eql(u8, exp2.word_index.hitPath(alpha_hits[0]), "src/a.zig"));
 
     const gamma_hits = try exp2.searchWord("Gamma", testing.allocator);
     defer testing.allocator.free(gamma_hits);
     try testing.expectEqual(@as(usize, 1), gamma_hits.len);
-    try testing.expect(std.mem.eql(u8, gamma_hits[0].path, "src/b.zig"));
+    try testing.expect(std.mem.eql(u8, exp2.word_index.hitPath(gamma_hits[0]), "src/b.zig"));
     try testing.expect(exp2.wordIndexIsComplete());
     try testing.expect(exp2.wordIndexNeedsPersist());
 }

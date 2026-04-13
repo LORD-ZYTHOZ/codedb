@@ -894,8 +894,10 @@ fn handleWord(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *s
 
     const w = out.writer(alloc);
     w.print("{d} hits for '{s}':\n", .{ hits.len, word }) catch {};
+    explorer.mu.lockShared();
+    defer explorer.mu.unlockShared();
     for (hits) |h| {
-        w.print("  {s}:{d}\n", .{ h.path, h.line_num }) catch {};
+        w.print("  {s}:{d}\n", .{ explorer.word_index.hitPath(h), h.line_num }) catch {};
     }
 }
 

@@ -491,10 +491,12 @@ fn mainImpl() !void {
                 sty.durationColor(s, elapsed), sty.formatDuration(&dur_buf, elapsed),
                 s.reset,
             });
+            explorer.mu.lockShared();
+            defer explorer.mu.unlockShared();
             for (hits) |h| {
                 out.p("  {s}{s}{s}:{s}{d}{s}\n", .{
-                    s.cyan, h.path,     s.reset,
-                    s.dim,  h.line_num, s.reset,
+                    s.cyan, explorer.word_index.hitPath(h), s.reset,
+                    s.dim,  h.line_num,                     s.reset,
                 });
             }
         }

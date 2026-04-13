@@ -1036,7 +1036,7 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
                 if (word_hits.len > 0) {
                     var word_paths = std.StringHashMap(void).init(allocator);
                     defer word_paths.deinit();
-                    for (word_hits) |hit| word_paths.put(hit.path, {}) catch {};
+                    for (word_hits) |hit| word_paths.put(self.word_index.hitPath(hit), {}) catch {};
                     var wp_iter = word_paths.keyIterator();
                     while (wp_iter.next()) |key_ptr| {
                         const ref = self.readContentForSearch(key_ptr.*, allocator) orelse continue;
