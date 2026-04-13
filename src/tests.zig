@@ -5659,3 +5659,109 @@ test "issue-179: Python docstring with text does not leak symbols" {
     try testing.expect(found_real);
     try testing.expect(!found_fake);
 }
+
+// ── New bug / perf regression tests ─────────────────────────────────────
+
+test "issue-246: TrigramIndex.removeFile cleans stale path_to_id left by failed indexFile" {
+    // Reproduces the corrupted state an OOM mid-way through indexFile leaves:
+    //   removeFile cleared file_trigrams, getOrCreateDocId wrote to path_to_id,
+    //   then an allocation failure meant file_trigrams.put never completed.
+    // Fix: removeFile must purge path_to_id even when file_trigrams has no entry.
+    var idx = TrigramIndex.init(testing.allocator);
+    defer idx.deinit();
+
+    // Plant the invariant-violating state OOM would leave behind.
+    try idx.path_to_id.put("ghost.zig", 0);
+    try idx.id_to_path.append(testing.allocator, "ghost.zig");
+    // file_trigrams intentionally has NO entry for "ghost.zig".
+
+    idx.removeFile("ghost.zig");
+
+    // Currently FAILS: removeFile returns early at the second file_trigrams.getPtr
+    // check, leaving path_to_id permanently dirty.
+    try testing.expectEqual(@as(usize, 0), idx.path_to_id.count());
+}
+
+test "issue-247: TrigramIndex.id_to_path does not grow on re-index of same file" {
+    // removeFile removes path_to_id[path] but leaves the id_to_path slot intact.
+    // getOrCreateDocId then appends a new slot since path_to_id misses.
+    // After N re-indexes id_to_path.items.len must equal the number of *unique* files.
+    var idx = TrigramIndex.init(testing.allocator);
+    defer idx.deinit();
+
+    const src = "fn alpha() void {} fn beta() void {} const X = 1;";
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        try idx.indexFile("f.zig", src);
+    }
+
+    // Currently FAILS: id_to_path.items.len == 5 (grows by 1 per re-index).
+    try testing.expectEqual(@as(usize, 1), idx.id_to_path.items.len);
+}
+
+test "issue-227: TrigramIndex.id_to_path stays bounded across many files re-indexed" {
+    // Broader regression: ensure re-indexing multiple distinct files also doesn't
+    // accumulate dead id_to_path slots.
+    var idx = TrigramIndex.init(testing.allocator);
+    defer idx.deinit();
+
+    const files = [_][]const u8{ "a.zig", "b.zig", "c.zig" };
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        for (files) |f| try idx.indexFile(f, "fn foo() void {}");
+    }
+
+    // 3 unique files × 4 rounds = 12 slots currently; fix should keep it at 3.
+    try testing.expectEqual(@as(usize, files.len), idx.id_to_path.items.len);
+}
+
+test "issue-248: PostingList.removeDocId removes target and preserves sorted order" {
+    // Documents the correctness contract for the O(log n) binary-search replacement.
+    // Currently correct but O(n); fix replaces linear scan with bsearch + single remove.
+    const PostingList = @import("index.zig").PostingList;
+    var list = PostingList{};
+    defer list.items.deinit(testing.allocator);
+
+    var id: u32 = 0;
+    while (id < 100) : (id += 1) {
+        const p = try list.getOrAddPosting(testing.allocator, id * 2); // even doc_ids 0..198
+        p.loc_mask = 0xFF;
+    }
+
+    list.removeDocId(50);
+    try testing.expectEqual(@as(usize, 99), list.items.items.len);
+    try testing.expect(list.getByDocId(48) != null);
+    try testing.expect(list.getByDocId(50) == null);
+    try testing.expect(list.getByDocId(52) != null);
+
+    // Sorted invariant must hold after removal.
+    for (1..list.items.items.len) |k| {
+        try testing.expect(list.items.items[k].doc_id > list.items.items[k - 1].doc_id);
+    }
+}
+
+test "issue-249: nuke.removeJsonMcpServerEntry returns null when key absent" {
+    // Verifies removeJsonMcpServerEntry does not signal a write when key is absent,
+    // which ensures the non-atomic rewriteConfigFile path is never triggered unnecessarily.
+    const result = try nuke_mod.removeJsonMcpServerEntry(testing.allocator, "{\"other\":1}", "codedb");
+    try testing.expect(result == null);
+}
+
+test "issue-250: searchContent finds content in files skipped by trigram index" {
+    // Files indexed with skip_trigram=true (e.g. past the 15k cap) must still be
+    // reachable via the fallback full-scan path in searchContent.
+    var explorer = Explorer.init(testing.allocator);
+    defer explorer.deinit();
+
+    try explorer.indexFileSkipTrigram("large.zig", "fn unique_zzz_sentinel() void {}");
+
+    const results = try explorer.searchContent("unique_zzz_sentinel", testing.allocator, 10);
+    defer {
+        for (results) |r| {
+            testing.allocator.free(r.path);
+            testing.allocator.free(r.line_text);
+        }
+        testing.allocator.free(results);
+    }
+    try testing.expectEqual(@as(usize, 1), results.len);
+}
