@@ -468,12 +468,52 @@ pub fn initialScanWithWorkerCount(store: *Store, explorer: *Explorer, root: []co
 /// Fast scan: walk + parse outlines + build trigrams in one pass.
 /// Avoids re-reading files for trigram build. Returns a TrigramIndex
 /// allocated with the given trigram_alloc (caller owns).
+fn readFileEntry(root: []const u8, entry: InitialScanEntry, arena_alloc: std.mem.Allocator) ?struct { path: []const u8, content: []const u8 } {
+    if (shouldSkipFile(entry.path)) return null;
+    var dir = std.fs.cwd().openDir(root, .{}) catch return null;
+    defer dir.close();
+    const file = dir.openFile(entry.path, .{}) catch return null;
+    defer file.close();
+    const stat = compat.fileStat(file) catch return null;
+    if (stat.size > 512 * 1024) return null;
+    const c = file.readToEndAlloc(arena_alloc, 512 * 1024) catch return null;
+    const check_len = @min(c.len, 512);
+    for (c[0..check_len]) |ch| {
+        if (ch == 0) return null;
+    }
+    return .{ .path = entry.path, .content = c };
+}
+
+const ReadResult = struct { path: []const u8, content: []const u8 };
+const ReadResults = struct {
+    arena: std.heap.ArenaAllocator,
+    items: std.ArrayList(ReadResult),
+
+    fn init(backing: std.mem.Allocator) ReadResults {
+        return .{ .arena = std.heap.ArenaAllocator.init(backing), .items = .{} };
+    }
+    fn deinit(self: *ReadResults, _: std.mem.Allocator) void {
+        self.items.deinit(self.arena.allocator());
+        self.arena.deinit();
+    }
+};
+
+fn readWorker(results: *ReadResults, root: []const u8, entries: []const InitialScanEntry) void {
+    const alloc = results.arena.allocator();
+    for (entries) |entry| {
+        if (readFileEntry(root, entry, alloc)) |r| {
+            results.items.append(alloc, r) catch {};
+        }
+    }
+}
+
 pub fn initialScanWithTrigrams(
     store: *Store,
     explorer: *Explorer,
     root: []const u8,
     allocator: std.mem.Allocator,
     trigram_alloc: std.mem.Allocator,
+    skip_outlines: bool,
 ) !?*TrigramIndex {
     var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
     defer dir.close();
@@ -498,7 +538,9 @@ pub fn initialScanWithTrigrams(
             defer arena.deinit();
             const parsed = parseInitialScanEntry(root, entry, arena.allocator()) catch null;
             if (parsed) |file| {
-                explorer.commitParsedFileOwnedOutline(file.path, file.content, file.outline, true, true) catch continue;
+                if (!skip_outlines) {
+                    explorer.commitParsedFileOwnedOutline(file.path, file.content, file.outline, true, true) catch continue;
+                }
                 // Build trigrams from same content — no re-read needed
                 if (file.content.len <= 64 * 1024) {
                     tmp_tri.indexFile(file.path, file.content) catch {};
@@ -508,39 +550,73 @@ pub fn initialScanWithTrigrams(
         return tmp_tri;
     }
 
-    // Multi-worker: parse in parallel, commit + trigram sequentially
-    const workers = try allocator.alloc(WorkerParsedResults, n_workers);
-    var workers_committed: usize = 0;
-    defer {
-        for (workers[workers_committed..]) |*worker| worker.deinit(allocator);
-        allocator.free(workers);
-    }
-    const threads = try allocator.alloc(std.Thread, n_workers);
-    defer allocator.free(threads);
-
-    const chunk_size = entries.items.len / n_workers;
-    const remainder = entries.items.len % n_workers;
-    var offset: usize = 0;
-    for (workers, 0..) |*worker, i| {
-        worker.* = WorkerParsedResults.init(std.heap.page_allocator);
-        const extra: usize = if (i < remainder) 1 else 0;
-        const count = chunk_size + extra;
-        const chunk = entries.items[offset .. offset + count];
-        offset += count;
-        threads[i] = try std.Thread.spawn(.{}, initialScanWorker, .{ worker, root, chunk });
-    }
-    for (threads) |thread| thread.join();
-
-    for (workers) |*worker| {
-        for (worker.items.items) |file| {
-            explorer.commitParsedFileOwnedOutline(file.path, file.content, file.outline, true, true) catch continue;
-            // Build trigrams from same content — no re-read
-            if (file.content.len <= 64 * 1024) {
-                tmp_tri.indexFile(file.path, file.content) catch {};
-            }
+    if (skip_outlines) {
+        // Fast path: just read files + build trigrams, no outline parsing
+        const readers = try allocator.alloc(ReadResults, n_workers);
+        var readers_done: usize = 0;
+        defer {
+            for (readers[readers_done..]) |*r| r.deinit(allocator);
+            allocator.free(readers);
         }
-        worker.deinit(allocator);
-        workers_committed += 1;
+        const threads = try allocator.alloc(std.Thread, n_workers);
+        defer allocator.free(threads);
+
+        const chunk_size = entries.items.len / n_workers;
+        const remainder = entries.items.len % n_workers;
+        var offset: usize = 0;
+        for (readers, 0..) |*reader, i| {
+            reader.* = ReadResults.init(std.heap.page_allocator);
+            const extra: usize = if (i < remainder) 1 else 0;
+            const count = chunk_size + extra;
+            const chunk = entries.items[offset .. offset + count];
+            offset += count;
+            threads[i] = try std.Thread.spawn(.{}, readWorker, .{ reader, root, chunk });
+        }
+        for (threads) |thread| thread.join();
+
+        for (readers) |*reader| {
+            for (reader.items.items) |r| {
+                if (r.content.len <= 64 * 1024) {
+                    tmp_tri.indexFile(r.path, r.content) catch {};
+                }
+            }
+            reader.deinit(allocator);
+            readers_done += 1;
+        }
+    } else {
+        // Full path: parse outlines + build trigrams
+        const workers = try allocator.alloc(WorkerParsedResults, n_workers);
+        var workers_committed: usize = 0;
+        defer {
+            for (workers[workers_committed..]) |*worker| worker.deinit(allocator);
+            allocator.free(workers);
+        }
+        const threads = try allocator.alloc(std.Thread, n_workers);
+        defer allocator.free(threads);
+
+        const chunk_size = entries.items.len / n_workers;
+        const remainder = entries.items.len % n_workers;
+        var offset: usize = 0;
+        for (workers, 0..) |*worker, i| {
+            worker.* = WorkerParsedResults.init(std.heap.page_allocator);
+            const extra: usize = if (i < remainder) 1 else 0;
+            const count = chunk_size + extra;
+            const chunk = entries.items[offset .. offset + count];
+            offset += count;
+            threads[i] = try std.Thread.spawn(.{}, initialScanWorker, .{ worker, root, chunk });
+        }
+        for (threads) |thread| thread.join();
+
+        for (workers) |*worker| {
+            for (worker.items.items) |file| {
+                explorer.commitParsedFileOwnedOutline(file.path, file.content, file.outline, true, true) catch continue;
+                if (file.content.len <= 64 * 1024) {
+                    tmp_tri.indexFile(file.path, file.content) catch {};
+                }
+            }
+            worker.deinit(allocator);
+            workers_committed += 1;
+        }
     }
     return tmp_tri;
 }

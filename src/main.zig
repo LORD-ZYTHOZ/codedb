@@ -227,7 +227,7 @@ fn mainImpl() !void {
             // For other commands: outline-only scan, trigrams from disk or rebuild.
             const is_search = std.mem.eql(u8, cmd, "search");
             if (is_search and !heads_match) {
-                const tmp_tri = try watcher.initialScanWithTrigrams(&store, &explorer, root, allocator, std.heap.c_allocator);
+                const tmp_tri = try watcher.initialScanWithTrigrams(&store, &explorer, root, allocator, std.heap.c_allocator, true);
                 if (tmp_tri) |tri| {
                     tri.writeToDisk(data_dir, git_head) catch {};
                     tri.deinit();
