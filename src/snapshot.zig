@@ -630,7 +630,7 @@ fn loadOutlineStateMap(snapshot_path: []const u8, allocator: std.mem.Allocator) 
 
         const symbol_count = try readSectionInt(u32, bytes, &cursor);
         for (0..symbol_count) |_| {
-            const name = try readSectionString(bytes, &cursor, allocator, 4096);
+            const name = try readSectionString(bytes, &cursor, allocator, std.math.maxInt(u16));
             if (name.len == 0) return error.InvalidData;
             errdefer allocator.free(name);
 
@@ -641,7 +641,7 @@ fn loadOutlineStateMap(snapshot_path: []const u8, allocator: std.mem.Allocator) 
             const has_detail = try readSectionByte(bytes, &cursor);
             const detail = switch (has_detail) {
                 0 => null,
-                1 => try readSectionString(bytes, &cursor, allocator, 4096),
+                1 => try readSectionString(bytes, &cursor, allocator, std.math.maxInt(u16)),
                 else => return error.InvalidData,
             };
             errdefer if (detail) |d| allocator.free(d);
@@ -704,7 +704,7 @@ fn loadSnapshotFast(
     store: *Store,
     allocator: std.mem.Allocator,
 ) !bool {
-    var outline_states = try loadOutlineStateMap(snapshot_path, allocator);
+    var outline_states = loadOutlineStateMap(snapshot_path, allocator) catch std.StringHashMap(FileOutline).init(allocator);
     defer deinitOutlineStateMap(&outline_states, allocator);
 
     var sections = (try readSections(snapshot_path, allocator)) orelse return false;
