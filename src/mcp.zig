@@ -357,7 +357,7 @@ const tools_list =
     \\{"name":"codedb_search","description":"Full-text search across all indexed files. Returns matching lines with file paths and line numbers. Start with max_results=10 for broad queries. Use scope=true to see the enclosing function/struct for each match. For single identifiers, prefer codedb_word (O(1) lookup) or codedb_symbol (definitions only).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Text to search for (substring match, or regex if regex=true)"},"max_results":{"type":"integer","description":"Maximum results to return (default: 50, start with 10 for broad queries)"},"scope":{"type":"boolean","description":"Annotate results with enclosing symbol scope (default: false)"},"compact":{"type":"boolean","description":"Skip comment and blank lines in results (default: false)"},"regex":{"type":"boolean","description":"Treat query as regex pattern (default: false)"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":["query"]}},
     \\{"name":"codedb_word","description":"O(1) word lookup using inverted index. Finds all occurrences of an exact word (identifier) across the codebase. Much faster than search for single-word queries.","inputSchema":{"type":"object","properties":{"word":{"type":"string","description":"Exact word/identifier to look up"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":["word"]}},
     \\{"name":"codedb_hot","description":"Get the most recently modified files in the codebase, ordered by recency. Useful to see what's been actively worked on.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Number of files to return (default: 10)"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":[]}},
-    \\{"name":"codedb_deps","description":"Get reverse dependencies: which files import/depend on the given file. Useful for impact analysis.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"File path to check dependencies for"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":["path"]}},
+    \\{"name":"codedb_deps","description":"Dependency graph queries. Default: which files import the given file (reverse deps). Use direction=depends_on for forward deps. Use transitive=true for full blast radius via BFS traversal. O(1) lookups via bidirectional graph index.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"File path to check dependencies for"},"direction":{"type":"string","enum":["imported_by","depends_on"],"description":"imported_by (default): who imports this file. depends_on: what this file imports."},"transitive":{"type":"boolean","description":"Follow dependency chain transitively (default: false)"},"max_depth":{"type":"integer","description":"Max traversal depth for transitive queries (default: unlimited)"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":["path"]}},
     \\{"name":"codedb_read","description":"Read file contents. IMPORTANT: Use codedb_outline first to find the line numbers you need, then read only that range with line_start/line_end. Avoid reading entire large files — use compact=true to skip comments and blanks. For understanding file structure, codedb_outline is 4-15x more token-efficient.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"File path relative to project root"},"line_start":{"type":"integer","description":"Start line (1-indexed, inclusive). Omit for full file."},"line_end":{"type":"integer","description":"End line (1-indexed, inclusive). Omit to read to EOF."},"if_hash":{"type":"string","description":"Previous content hash. If unchanged, returns short 'unchanged:HASH' response."},"compact":{"type":"boolean","description":"Skip comment and blank lines (default: false)"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":["path"]}},
     \\{"name":"codedb_edit","description":"Apply a line-based edit to a file. Supports replace (range), insert (after line), and delete (range) operations.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"File path to edit"},"op":{"type":"string","enum":["replace","insert","delete"],"description":"Edit operation type"},"content":{"type":"string","description":"New content (for replace/insert)"},"range_start":{"type":"integer","description":"Start line number (for replace/delete, 1-indexed)"},"range_end":{"type":"integer","description":"End line number (for replace/delete, 1-indexed)"},"after":{"type":"integer","description":"Insert after this line number (for insert)"}},"required":["path","op"]}},
     \\{"name":"codedb_changes","description":"Get files that changed since a sequence number. Use with codedb_status to poll for changes.","inputSchema":{"type":"object","properties":{"since":{"type":"integer","description":"Sequence number to get changes since (default: 0)"}},"required":[]}},
@@ -368,7 +368,7 @@ const tools_list =
     \\{"name":"codedb_projects","description":"List all locally indexed projects on this machine. Shows project paths, data directory hashes, and whether a snapshot exists. Use to discover what codebases are available.","inputSchema":{"type":"object","properties":{},"required":[]}},
     \\{"name":"codedb_index","description":"Index a local folder on this machine. Scans all source files, builds outlines/trigrams/word indexes, and creates a codedb.snapshot in the target directory. After indexing, the folder is queryable via the project param on any tool.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the folder to index (e.g. /Users/you/myproject)"}},"required":["path"]}},
     \\{"name":"codedb_find","description":"Fuzzy file search — finds files by approximate name. Typo-tolerant subsequence matching with word-boundary and filename bonuses. Use when you know roughly what file you're looking for but not the exact path. Much faster than codedb_tree + manual scan.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Fuzzy search query (e.g. 'authmidlware', 'test_auth', 'main.zig')"},"max_results":{"type":"integer","description":"Maximum results to return (default: 10)"},"project":{"type":"string","description":"Optional absolute path to a different project (must have codedb.snapshot)"}},"required":["query"]}},
-    \\{"name":"codedb_query","description":"Composable search pipeline — chain multiple operations where each step feeds the next. Replaces multi-tool workflows with a single call. Pipeline ops: find (fuzzy file search), search (content grep), filter (by extension/path glob), outline (get symbols), read (file contents), sort (by score/path), limit (truncate). Each step operates on the file set from the previous step.","inputSchema":{"type":"object","properties":{"pipeline":{"type":"array","items":{"type":"object"},"description":"Array of pipeline steps. Each step has 'op' (find/search/filter/outline/read/sort/limit) and op-specific params. Steps execute in order, each filtering/transforming the file set from the previous step."},"project":{"type":"string","description":"Optional absolute path to a different project"}},"required":["pipeline"]}}
+    \\{"name":"codedb_query","description":"Composable search pipeline — chain multiple operations where each step feeds the next. Replaces multi-tool workflows with a single call. Pipeline ops: find (fuzzy file search), search (content grep), filter (by extension/path glob), deps (expand via dependency graph), outline (get symbols), read (file contents), sort (by score/path), limit (truncate). Each step operates on the file set from the previous step.","inputSchema":{"type":"object","properties":{"pipeline":{"type":"array","items":{"type":"object"},"description":"Array of pipeline steps. Each step has 'op' (find/search/filter/deps/outline/read/sort/limit) and op-specific params. Steps execute in order, each filtering/transforming the file set from the previous step. deps op: {\"op\":\"deps\",\"direction\":\"imported_by|depends_on\",\"transitive\":true,\"max_depth\":3}"},"project":{"type":"string","description":"Optional absolute path to a different project"}},"required":["pipeline"]}}
     \\]}
 ;
 
@@ -930,23 +930,71 @@ fn handleDeps(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *s
         out.appendSlice(alloc, "error: missing 'path' argument") catch {};
         return;
     };
-    const imported_by = explorer.getImportedBy(path, alloc) catch {
-        out.appendSlice(alloc, "error: deps failed") catch {};
-        return;
-    };
+    const direction = getStr(args, "direction") orelse "imported_by";
+    const transitive = getBool(args, "transitive");
+    const max_depth: ?u32 = if (getInt(args, "max_depth")) |n| @intCast(@max(1, n)) else null;
+
+    const is_forward = std.mem.eql(u8, direction, "depends_on");
+
+    var results: []const []const u8 = &.{};
+    if (is_forward) {
+        if (transitive) {
+            results = explorer.getTransitiveDependencies(path, alloc, max_depth) catch {
+                out.appendSlice(alloc, "error: deps failed") catch {};
+                return;
+            };
+        } else {
+            explorer.mu.lockShared();
+            const fwd = explorer.dep_graph.getForwardDeps(path);
+            explorer.mu.unlockShared();
+            if (fwd) |deps| {
+                var result_list: std.ArrayList([]const u8) = .{};
+                for (deps) |dep| {
+                    const d = alloc.dupe(u8, dep) catch continue;
+                    result_list.append(alloc, d) catch { alloc.free(d); continue; };
+                }
+                results = result_list.toOwnedSlice(alloc) catch &.{};
+            }
+        }
+    } else {
+        if (transitive) {
+            results = explorer.getTransitiveDependents(path, alloc, max_depth) catch {
+                out.appendSlice(alloc, "error: deps failed") catch {};
+                return;
+            };
+        } else {
+            results = explorer.getImportedBy(path, alloc) catch {
+                out.appendSlice(alloc, "error: deps failed") catch {};
+                return;
+            };
+        }
+    }
     defer {
-        for (imported_by) |dep| alloc.free(dep);
-        alloc.free(imported_by);
+        for (results) |dep| alloc.free(dep);
+        alloc.free(results);
     }
 
     const w = out.writer(alloc);
-    w.print("{s} is imported by:\n", .{path}) catch {};
-    if (imported_by.len == 0) {
-        w.writeAll("  (no dependents found)\n") catch {};
+    if (is_forward) {
+        if (transitive) {
+            w.print("{s} transitively depends on:\n", .{path}) catch {};
+        } else {
+            w.print("{s} depends on:\n", .{path}) catch {};
+        }
     } else {
-        for (imported_by) |dep| {
+        if (transitive) {
+            w.print("{s} is transitively imported by:\n", .{path}) catch {};
+        } else {
+            w.print("{s} is imported by:\n", .{path}) catch {};
+        }
+    }
+    if (results.len == 0) {
+        w.writeAll("  (none)\n") catch {};
+    } else {
+        for (results) |dep| {
             w.print("  {s}\n", .{dep}) catch {};
         }
+        w.print("({d} files)\n", .{results.len}) catch {};
     }
 }
 
@@ -1724,6 +1772,63 @@ fn handleQuery(alloc: std.mem.Allocator, args: *const std.json.ObjectMap, out: *
                     }
                 }
                 have_set = true;
+            }
+        } else if (std.mem.eql(u8, op, "deps")) {
+            // Expand file set by adding dependents/dependencies of current files
+            if (!have_set) { w.print("error: deps needs prior step\n", .{}) catch {}; return; }
+            const direction = getStr(step, "direction") orelse "imported_by";
+            const transitive = getBool(step, "transitive");
+            const max_depth_val: ?u32 = if (getInt(step, "max_depth")) |n| @intCast(@max(1, n)) else null;
+            const is_forward = std.mem.eql(u8, direction, "depends_on");
+
+            var expanded = std.StringHashMap(void).init(alloc);
+            defer expanded.deinit();
+            for (file_set.items) |path| expanded.put(path, {}) catch {};
+
+            // Snapshot current file set since we'll append to it
+            const current_len = file_set.items.len;
+            for (file_set.items[0..current_len]) |path| {
+                var deps_result: []const []const u8 = &.{};
+                var needs_free = false;
+
+                if (is_forward) {
+                    if (transitive) {
+                        deps_result = explorer.getTransitiveDependencies(path, alloc, max_depth_val) catch continue;
+                        needs_free = true;
+                    } else {
+                        explorer.mu.lockShared();
+                        const fwd = explorer.dep_graph.getForwardDeps(path);
+                        explorer.mu.unlockShared();
+                        if (fwd) |deps| {
+                            var res: std.ArrayList([]const u8) = .{};
+                            for (deps) |dep| {
+                                const d = alloc.dupe(u8, dep) catch continue;
+                                res.append(alloc, d) catch { alloc.free(d); continue; };
+                            }
+                            deps_result = res.toOwnedSlice(alloc) catch &.{};
+                            needs_free = true;
+                        }
+                    }
+                } else {
+                    if (transitive) {
+                        deps_result = explorer.getTransitiveDependents(path, alloc, max_depth_val) catch continue;
+                    } else {
+                        deps_result = explorer.getImportedBy(path, alloc) catch continue;
+                    }
+                    needs_free = true;
+                }
+
+                defer if (needs_free) {
+                    for (deps_result) |dep| alloc.free(dep);
+                    alloc.free(deps_result);
+                };
+
+                for (deps_result) |dep| {
+                    if (!expanded.contains(dep)) {
+                        expanded.put(dep, {}) catch {};
+                        file_set.append(alloc, dep) catch {};
+                    }
+                }
             }
         } else if (std.mem.eql(u8, op, "filter")) {
             if (!have_set) {
