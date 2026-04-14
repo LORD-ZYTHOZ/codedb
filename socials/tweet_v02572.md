@@ -5,81 +5,68 @@ Best times to post (SGT): Tue-Thu, 11 PM - 1 AM
 
 ---
 
-Tweet 1 (The big numbers)
+Tweet 1 (Hook)
 
-codedb v0.2.572 is out.
+codedb v0.2.572 just dropped.
 
-10× faster cold indexing: 3.6s → 346ms
-83% less cold RSS: 3.5GB → 580MB
-92% less warm RSS: 1.9GB → 150MB
+220µs search on 6,315 files. 2.3x faster than fff-mcp. 6x better recall. 2,272x faster than ripgrep.
 
-Hotfix patch on v0.2.57 — same performance gains, correctness fixes included.
+12 SIMD optimizations. Zero std.json. Single-threaded Zig beating Rust + rayon.
 
 ---
 
-Tweet 2 (vs fff-mcp)
+Tweet 2 (The numbers)
 
-Real benchmark: query "fn" on openclaw (6,315 files)
+Real benchmarks on openclaw (6,315 files), query "fn" — linear scale:
 
-codedb:   220µs  — 12 files found (22% recall)
-fff-mcp:  510µs  — 2 files found (4% recall)
-ripgrep:  ~500ms — ~48,000 lines dumped
-grep:    ~1,500ms — ~48,200 lines dumped
+codedb:  220µs  (0.00022s) — warm trigram, 12 files (22% recall)
+fff-mcp: 510µs  (0.00051s) — bigram + frecency, 2 files (4% recall)
+ripgrep: ~500ms (0.5s)     — cold disk scan, ~48,000 lines
+grep:    ~1,500ms (1.5s)   — cold disk scan, ~48,200 lines
 
-2.3× faster than fff-mcp (Rust + rayon).
-6× better recall.
-2,272× faster than ripgrep.
+2.3x faster than fff-mcp. 6x better recall. 2,272x faster than ripgrep.
 
 ---
 
-Tweet 3 (Why codedb beats fff-mcp on recall)
+Tweet 3 (Recall)
 
-fff-mcp uses word-boundary grep.
-It misses "DatabaseManager" when you search "manager".
+fff-mcp uses word-boundary grep. Searches "manager", misses "DatabaseManager".
 
-codedb uses a trigram index.
-It finds substrings — the way you actually think.
+codedb uses a trigram index. Finds substrings. 6x more files returned.
 
 Same latency tier. Way more results.
 
 ---
 
-Tweet 4 (What 220 microseconds means)
+Tweet 4 (SIMD engine)
 
-220 microseconds = 0.00022 seconds
+12 search engine changes in v0.2.572:
 
-Your AI agent can:
-- Run 4,500 codedb searches in 1 second
-- Or wait 1 second for a single grep
+16-byte @Vector memmem scanner. SIMD newline detection. Tiered search — trigram → sparse → word → full scan. Lazy sparse: skip covering-set hash when trigrams hit. Size-sorted candidates. Per-file result cap. Deferred searched HashMap.
 
-Pre-indexed. No filesystem scan. No raw text dumps.
+O(1) everywhere it matters.
 
 ---
 
-Tweet 5 (SIMD search engine)
+Tweet 5 (MCP layer)
 
-12 optimizations in v0.2.572 search engine:
+MCP layer improvements:
 
-- SIMD memmem: 16-byte @Vector first-byte scanner
-- Tiered search: trigram → sparse → word → full scan
-- Lazy sparse: skip covering-set hash when trigrams hit
-- Size-sorted candidates: smallest files first
-- Per-file result cap: no single file dominates
+Zero std.json — scanner-based extraction for all request types. Arena allocator + reusable buffers. Single stdout write per response. Buffered stdin reads.
 
-Single-threaded Zig beating Rust + rayon.
+Every round-trip down.
 
 ---
 
-Tweet 6 (Zero std.json MCP layer)
+Tweet 6 (Memory + indexing)
 
-MCP layer in v0.2.572:
+Same v0.2.57 gains still in:
 
-- Zero std.json: scanner-based extraction for all request types
-- Arena allocator + reusable buffers
-- Single stdout write per response
-- Buffered stdin reads (4KB)
+10x faster cold indexing: 3.6s → 346ms.
+83% less cold RSS: 3.5GB → 580MB.
+92% less warm RSS: 1.9GB → 150MB.
 
-Every microsecond counts.
+v0.2.572 is a hotfix on top. All improvements carry over.
 
 ---
 
@@ -87,39 +74,30 @@ Tweet 7 (Contributors)
 
 18 issues closed. 10 contributors.
 
-@JF10R: trigram growth, drainNotifyFile
-@ocordeiro: symbol.line_end
-@destroyer22719: MCP disconnections
-@wilsonsilva: remote requests
-@killop: Windows support
-@sims1253: R language, PHP/Ruby fixes
-@JustFly1984: DNS, version issues
-@mochadwi: comparisons
-@Mavis2103: memory ideas
+@JF10R @ocordeiro @destroyer22719 @wilsonsilva @killop @sims1253 @JustFly1984 @mochadwi @Mavis2103
 
-Thank you all.
+Thank you.
 
 ---
 
 Tweet 8 (CTA)
 
-Update now:
+Update:
 
 codedb update
 
-Or fresh install:
+Fresh install:
 curl -fsSL https://codedb.codegraff.com/install.sh | bash
 
-macOS: signed + notarized
-Linux: x86_64
+macOS: signed + notarized. Linux: x86_64.
 
 ---
 
 Single tweet version
 
-codedb v0.2.572: 220µs search on 6k files. 2.3× faster than fff-mcp (Rust). 6× better recall. 2,272× faster than ripgrep.
+codedb v0.2.572: 220µs search. 2.3x faster than fff-mcp (Rust+rayon). 6x better recall. 2,272x faster than ripgrep.
 
-Trigram index + SIMD scanner. Pure Zig. Zero deps.
+12 SIMD optimizations. Zero std.json. Pure Zig.
 
 codedb update
 
@@ -127,26 +105,14 @@ codedb update
 
 Thread starter
 
-codedb v0.2.572
+codedb v0.2.572.
 
-220µs search (fn, openclaw 6k files)
-2.3× faster than fff-mcp
-6× better recall than fff-mcp
-2,272× faster than ripgrep
-12 SIMD optimizations
+220µs. 6,315 files. Query "fn".
+2.3x faster than fff-mcp.
+6x better recall than fff-mcp.
+2,272x faster than ripgrep.
 
-Full thread ↓
-🧵
-
----
-
-Emoji options
-
-⚡ 220µs search (2,272× ripgrep)
-🎯 6× better recall than fff-mcp (Rust)
-🔍 Trigram finds substrings, word-boundary grep doesn't
-🛠️ 18 issues fixed
-🙏 10 contributors
+Thread ↓
 
 ---
 
@@ -156,6 +122,6 @@ Hashtags
 
 ---
 
-Link to use
+Link
 
 https://github.com/justrach/codedb/releases/tag/v0.2.572
