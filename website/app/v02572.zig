@@ -1,7 +1,7 @@
 const mer = @import("mer");
 
 pub const meta: mer.Meta = .{
-    .title = "What's New in v0.2.57",
+    .title = "What's New in v0.2.572",
     .description = "10× faster indexing, 83% less memory, 92% warm RSS reduction, 18 issues closed.",
 };
 
@@ -22,7 +22,7 @@ const html =
     \\<head>
     \\  <meta charset="UTF-8">
     \\  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    \\  <title>What's New — codedb v0.2.57</title>
+    \\  <title>What's New — codedb v0.2.572</title>
     \\  <link rel="preconnect" href="https://fonts.googleapis.com">
     \\  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     \\  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -123,14 +123,14 @@ const html =
     \\    <a href="/benchmarks">Benchmarks</a>
     \\    <a href="/improvements">Improvements</a>
     \\    <a href="/quickstart">Install</a>
-    \\    <a href="/v0.2.57" style="color:#10b981;font-weight:600;">v0.2.57</a>
+    \\    <a href="/v0.2.572" style="color:#10b981;font-weight:600;">v0.2.572</a>
     \\    <a href="https://github.com/justrach/codedb">GitHub</a>
     \\    <a href="/quickstart" class="nav-cta">Get started</a>
     \\  </div>
     \\</div></nav>
     \\<div style="background:var(--dark);color:#fff;">
     \\  <div class="hero">
-    \\    <div class="hero-label">v0.2.57 Release</div>
+    \\    <div class="hero-label">v0.2.572 Release</div>
     \\    <div class="hero-headline"><span class="hl">10×</span> faster initial index. <span class="hl">83%</span> less cold RSS. <span class="hl">92%</span> less warm RSS. <span class="hl">1000×</span> ripgrep.</div>
     \\    <div class="hero-sub">Cold-start indexing on openclaw (6,315 files) — 18 issues closed — 10 contributors</div>
     \\    <div class="stat-row">
@@ -147,7 +147,7 @@ const html =
     \\    <div class="section-heading">Before &amp; after — openclaw (6,315 files, Apple M4 Pro)</div>
     \\    <p class="section-sub" style="color:var(--muted);">All metrics from <code>zig build benchmark</code> on real repos. ReleaseFast builds.</p>
     \\    <table class="bench-table" style="color:var(--text);">
-    \\      <thead><tr><th>Metric</th><th>v0.2.56</th><th>v0.2.57</th><th>Delta</th></tr></thead>
+    \\      <thead><tr><th>Metric</th><th>v0.2.56</th><th>v0.2.572</th><th>Delta</th></tr></thead>
     \\      <tbody>
     \\        <tr><td>Initial index time</td><td class="old">3.6 s</td><td class="fast">346 ms</td><td class="fast">10× faster</td></tr>
     \\        <tr><td>Cold RSS (peak)</td><td class="old">~3.5 GB</td><td class="fast">~580 MB</td><td class="fast">−83%</td></tr>
@@ -193,14 +193,15 @@ const html =
     \\<div class="section" style="background:var(--bg2);color:var(--text);">
     \\  <div class="section-inner">
     \\    <div class="section-eyebrow" style="color:var(--accent);">Real-world benchmark</div>
-    \\    <div class="section-heading">codedb vs ripgrep vs grep</div>
-    \\    <p class="section-sub" style="color:var(--muted);">Internal search for "manager" on openclaw (6,315 files). Warm trigram index vs cold disk scan. Apple M4 Pro, median of 5 runs.</p>
+    \\    <div class="section-heading">codedb vs fff-mcp vs ripgrep vs grep</div>
+    \\    <p class="section-sub" style="color:var(--muted);">Internal search for "fn" on openclaw (6,315 files). Warm trigram index vs cold disk scan. Apple M4 Pro, median of 5 runs.</p>
     \\    <table class="bench-table" style="color:var(--text);">
     \\      <thead><tr><th>Tool</th><th>Internal search</th><th>Results</th><th>Approach</th><th>vs codedb</th></tr></thead>
     \\      <tbody>
-    \\        <tr><td><strong>codedb v0.2.57</strong> (Zig)</td><td class="fast">~500 µs</td><td>20 (limited)</td><td>Warm trigram</td><td class="fast">baseline</td></tr>
-    \\        <tr><td>ripgrep 15.1</td><td>~500 ms</td><td>2,959 (all)</td><td>Disk scan</td><td>1,000× slower</td></tr>
-    \\        <tr><td>GNU grep</td><td>~1,500 ms</td><td>2,973 (all)</td><td>Disk scan</td><td>3,000× slower</td></tr>
+        \\        <tr><td><strong>codedb v0.2.572</strong> (Zig)</td><td class="fast">~220 µs</td><td>12 files (22% recall)</td><td>Warm trigram</td><td class="fast">baseline</td></tr>
+        \\        <tr><td>fff-mcp 0.5.2 (Rust)</td><td>~510 µs</td><td>2 files (4% recall)</td><td>Bigram + frecency</td><td>2.3× slower, 6× fewer files</td></tr>
+        \\        <tr><td>ripgrep 15.1</td><td>~500 ms</td><td>~48,000 lines (all)</td><td>Disk scan</td><td>2,272× slower</td></tr>
+        \\        <tr><td>GNU grep</td><td>~1,500 ms</td><td>~48,200 lines (all)</td><td>Disk scan</td><td>6,818× slower</td></tr>
     \\      </tbody>
     \\    </table>
     \\    <div style="background:var(--dark3);border-radius:8px;padding:20px;margin:24px 0;border-left:3px solid var(--accent);">
@@ -216,7 +217,7 @@ const html =
     \\      <div class="chart-card"><h3>Search latency (ms)</h3><canvas id="searchChart"></canvas></div>
     \\      <div class="chart-card"><h3>Results returned (log scale)</h3><canvas id="resultsChart"></canvas></div>
     \\    </div>
-    \\    <p style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:16px;">Note: Internal search times measured. codedb trigram lookup ~500µs. ripgrep/grep cold disk scan 500-1,500ms. MCP overhead (JSON-RPC) adds ~20ms for codedb, not shown here.</p>
+    \\    <p style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:16px;">Note: Internal search times measured. codedb trigram lookup ~220µs. fff-mcp bigram+frecency ~510µs. ripgrep/grep cold disk scan 500–1,500ms.</p>
     \\  </div>
     \\</div>
     \\<div class="timeline-section" style="background:var(--dark2);color:#fff;">
@@ -253,11 +254,11 @@ const html =
     \\</div>
     \\<div class="cta-section" style="background:var(--dark);color:#fff;">
     \\  <div class="cta-inner" style="border-color:rgba(255,255,255,0.08);">
-    \\    <div style="font-family:var(--sans);font-size:28px;font-weight:800;margin-bottom:16px;">Ready to try v0.2.57?</div>
+    \\    <div style="font-family:var(--sans);font-size:28px;font-weight:800;margin-bottom:16px;">Ready to try v0.2.572?</div>
     \\    <div class="install-cmd" style="background:var(--dark3);border-color:rgba(255,255,255,0.08);color:rgba(255,255,255,0.7);">curl -fsSL https://codedb.codegraff.com/install.sh | bash</div>
     \\    <p style="font-size:13px;color:rgba(255,255,255,0.3);margin-top:16px;">macOS Apple Silicon (codesigned + notarized) &middot; Linux x86_64 &middot; SHA256 checksums</p>
     \\    <a href="/quickstart" class="btn btn-primary" style="margin-top:24px;">Get started</a>
-    \\    <a href="https://github.com/justrach/codedb/releases/tag/v0.2.57" class="btn btn-ghost" style="border-color:rgba(255,255,255,0.15);color:rgba(255,255,255,0.6);">View release notes</a>
+    \\    <a href="https://github.com/justrach/codedb/releases/tag/v0.2.572" class="btn btn-ghost" style="border-color:rgba(255,255,255,0.15);color:rgba(255,255,255,0.6);">View release notes</a>
     \\  </div>
     \\</div>
     \\<footer class="layout-footer" style="background:var(--dark);color:rgba(255,255,255,0.2);border-top:1px solid rgba(255,255,255,0.06);">
@@ -269,22 +270,22 @@ const html =
     \\  Chart.defaults.color = '#6b7280';
     \\  new Chart(document.getElementById('indexChart'), {
     \\    type: 'bar',
-    \\    data: { labels: ['openclaw (6k files)', 'vitess (5k files)'], datasets: [{ label: 'v0.2.56', data: [3.6, 2.8], backgroundColor: red, borderRadius: 4 }, { label: 'v0.2.57', data: [0.346, 0.280], backgroundColor: green, borderRadius: 4 }] },
+    \\    data: { labels: ['openclaw (6k files)', 'vitess (5k files)'], datasets: [{ label: 'v0.2.56', data: [3.6, 2.8], backgroundColor: red, borderRadius: 4 }, { label: 'v0.2.572', data: [0.346, 0.280], backgroundColor: green, borderRadius: 4 }] },
     \\    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } }, scales: { y: { title: { display: true, text: 'Seconds' }, grid: { color: '#f3f4f6' } }, x: { grid: { display: false } } } }
     \\  });
     \\  new Chart(document.getElementById('memChart'), {
     \\    type: 'bar',
-    \\    data: { labels: ['Cold RSS', 'Warm RSS'], datasets: [{ label: 'v0.2.56', data: [3500, 1900], backgroundColor: red, borderRadius: 4 }, { label: 'v0.2.57', data: [580, 150], backgroundColor: green, borderRadius: 4 }] },
+    \\    data: { labels: ['Cold RSS', 'Warm RSS'], datasets: [{ label: 'v0.2.56', data: [3500, 1900], backgroundColor: red, borderRadius: 4 }, { label: 'v0.2.572', data: [580, 150], backgroundColor: green, borderRadius: 4 }] },
     \\    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } }, scales: { y: { title: { display: true, text: 'MB' }, grid: { color: '#f3f4f6' } }, x: { grid: { display: false } } } }
     \\  });
     \\  new Chart(document.getElementById('searchChart'), {
     \\    type: 'bar',
-    \\    data: { labels: ['codedb', 'ripgrep', 'grep'], datasets: [{ data: [0.5, 500, 1500], backgroundColor: [green, '#9ca3af', gray], borderRadius: 4, barThickness: 32 }] },
+    \\    data: { labels: ["codedb (0.22ms)", "fff-mcp (0.51ms)", "ripgrep (~500ms)", "grep (~1500ms)"], datasets: [{ data: [0.22, 0.51, 500, 1500], backgroundColor: [green, "#3b82f6", "#9ca3af", gray], borderRadius: 4, barThickness: 32 }] },
     \\    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { title: { display: true, text: 'ms (linear scale)' }, grid: { color: '#f3f4f6' } }, y: { grid: { display: false }, ticks: { font: { family: "'Geist', sans-serif", size: 13, weight: 600 }, color: '#111' } } } }
     \\  });
     \\  new Chart(document.getElementById('resultsChart'), {
     \\    type: 'bar',
-    \\    data: { labels: ['codedb (20)', 'ripgrep (2959)', 'grep (2973)'], datasets: [{ data: [20, 2959, 2973], backgroundColor: [green, '#9ca3af', gray], borderRadius: 4, barThickness: 32 }] },
+    \\    data: { labels: ["codedb (12 files)", "fff-mcp (2 files)", "ripgrep (~48k lines)", "grep (~48k lines)"], datasets: [{ data: [12, 2, 48000, 48200], backgroundColor: [green, "#3b82f6", "#9ca3af", gray], borderRadius: 4, barThickness: 32 }] },
     \\    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { title: { display: true, text: 'results (linear scale)' }, grid: { color: '#f3f4f6' } }, y: { grid: { display: false }, ticks: { font: { family: "'Geist', sans-serif", size: 13, weight: 600 }, color: '#111' } } } }
     \\  });
     \\  document.getElementById('burger')?.addEventListener('click', function() { this.classList.toggle('open'); document.getElementById('nav-links').classList.toggle('open'); });

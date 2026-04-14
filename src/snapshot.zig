@@ -662,7 +662,7 @@ fn rebuildDepsFromOutline(explorer: *Explorer, path: []const u8, outline: *const
         try deps.append(allocator, imp);
     }
 
-    try explorer.dep_graph.put(path, deps);
+    try explorer.dep_graph.setDeps(path, deps);
 }
 
 fn insertRestoredFile(

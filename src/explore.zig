@@ -130,10 +130,252 @@ pub const SearchResult = struct {
     line_text: []const u8,
 };
 
+pub const DependencyGraph = struct {
+    forward: std.StringHashMap(std.ArrayList([]const u8)),
+    reverse: std.StringHashMap(std.StringHashMap(void)),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) DependencyGraph {
+        return .{
+            .forward = std.StringHashMap(std.ArrayList([]const u8)).init(allocator),
+            .reverse = std.StringHashMap(std.StringHashMap(void)).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *DependencyGraph) void {
+        var fwd_iter = self.forward.iterator();
+        while (fwd_iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.forward.deinit();
+
+        var rev_iter = self.reverse.iterator();
+        while (rev_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.reverse.deinit();
+    }
+
+    pub fn setDeps(self: *DependencyGraph, path: []const u8, deps: std.ArrayList([]const u8)) !void {
+        // Remove old reverse edges for this path
+        if (self.forward.getPtr(path)) |old_deps| {
+            for (old_deps.items) |old_dep| {
+                if (self.reverse.getPtr(old_dep)) |rev_set| {
+                    _ = rev_set.remove(path);
+                }
+            }
+            old_deps.deinit(self.allocator);
+        }
+
+        // Set forward edge
+        const gop = try self.forward.getOrPut(path);
+        gop.key_ptr.* = path;
+        gop.value_ptr.* = deps;
+
+        // Add reverse edges: for each dep, record that `path` depends on it
+        for (deps.items) |dep| {
+            const rev_gop = try self.reverse.getOrPut(dep);
+            if (!rev_gop.found_existing) {
+                rev_gop.key_ptr.* = dep;
+                rev_gop.value_ptr.* = std.StringHashMap(void).init(self.allocator);
+            }
+            try rev_gop.value_ptr.put(path, {});
+        }
+    }
+
+    pub fn remove(self: *DependencyGraph, path: []const u8) void {
+        // Remove forward edges and their reverse counterparts
+        if (self.forward.getPtr(path)) |deps| {
+            for (deps.items) |dep| {
+                if (self.reverse.getPtr(dep)) |rev_set| {
+                    _ = rev_set.remove(path);
+                }
+            }
+            deps.deinit(self.allocator);
+            _ = self.forward.remove(path);
+        }
+        // Remove path from reverse index (others importing this path)
+        // The entries in reverse[path] are the files that import `path`.
+        // We don't remove those — they still have forward edges pointing here.
+        // We just remove the reverse key if nobody imports this path anymore.
+        // Actually, we should NOT remove reverse[path] here — other files
+        // still reference `path` in their forward edges. The reverse entry
+        // is cleaned up lazily when those files are re-indexed or removed.
+    }
+
+    pub fn getForwardDeps(self: *const DependencyGraph, path: []const u8) ?[]const []const u8 {
+        const deps = self.forward.get(path) orelse return null;
+        return deps.items;
+    }
+
+    pub fn getImportedBy(self: *const DependencyGraph, path: []const u8, allocator: std.mem.Allocator) ![]const []const u8 {
+        // Extract basename for matching (e.g., "src/store.zig" -> "store.zig")
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |pos| path[pos + 1 ..] else path;
+
+        var result: std.ArrayList([]const u8) = .{};
+        errdefer {
+            for (result.items) |p| allocator.free(p);
+            result.deinit(allocator);
+        }
+
+        // O(1) lookup: check reverse index for exact path match
+        if (self.reverse.get(path)) |rev_set| {
+            var rev_iter = rev_set.keyIterator();
+            while (rev_iter.next()) |key_ptr| {
+                const dep_path = try allocator.dupe(u8, key_ptr.*);
+                try result.append(allocator, dep_path);
+            }
+        }
+
+        // Also check basename match (imports often use short names)
+        if (!std.mem.eql(u8, path, basename)) {
+            if (self.reverse.get(basename)) |rev_set| {
+                var rev_iter = rev_set.keyIterator();
+                while (rev_iter.next()) |key_ptr| {
+                    // Avoid duplicates from exact path match above
+                    var already = false;
+                    for (result.items) |existing| {
+                        if (std.mem.eql(u8, existing, key_ptr.*)) {
+                            already = true;
+                            break;
+                        }
+                    }
+                    if (!already) {
+                        const dep_path = try allocator.dupe(u8, key_ptr.*);
+                        try result.append(allocator, dep_path);
+                    }
+                }
+            }
+        }
+
+        return result.toOwnedSlice(allocator);
+    }
+
+    pub fn getTransitiveDependents(self: *const DependencyGraph, path: []const u8, allocator: std.mem.Allocator, max_depth: ?u32) ![]const []const u8 {
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |pos| path[pos + 1 ..] else path;
+
+        var visited = std.StringHashMap(void).init(allocator);
+        defer visited.deinit();
+
+        var queue: std.ArrayList(struct { path: []const u8, depth: u32 }) = .{};
+        defer queue.deinit(allocator);
+
+        try visited.put(path, {});
+        if (!std.mem.eql(u8, path, basename)) {
+            try visited.put(basename, {});
+        }
+        try queue.append(allocator, .{ .path = path, .depth = 0 });
+        if (!std.mem.eql(u8, path, basename)) {
+            try queue.append(allocator, .{ .path = basename, .depth = 0 });
+        }
+
+        var result: std.ArrayList([]const u8) = .{};
+        errdefer {
+            for (result.items) |p| allocator.free(p);
+            result.deinit(allocator);
+        }
+
+        var head: usize = 0;
+        while (head < queue.items.len) {
+            const item = queue.items[head];
+            head += 1;
+
+            const depth_limit = max_depth orelse std.math.maxInt(u32);
+            if (item.depth >= depth_limit) continue;
+
+            if (self.reverse.get(item.path)) |rev_set| {
+                var rev_iter = rev_set.keyIterator();
+                while (rev_iter.next()) |key_ptr| {
+                    const dep = key_ptr.*;
+                    if (!visited.contains(dep)) {
+                        try visited.put(dep, {});
+                        const dep_copy = try allocator.dupe(u8, dep);
+                        try result.append(allocator, dep_copy);
+                        try queue.append(allocator, .{ .path = dep, .depth = item.depth + 1 });
+
+                        // Also enqueue basename for this dep
+                        const dep_basename = if (std.mem.lastIndexOfScalar(u8, dep, '/')) |pos| dep[pos + 1 ..] else dep;
+                        if (!std.mem.eql(u8, dep, dep_basename) and !visited.contains(dep_basename)) {
+                            try visited.put(dep_basename, {});
+                            try queue.append(allocator, .{ .path = dep_basename, .depth = item.depth + 1 });
+                        }
+                    }
+                }
+            }
+        }
+
+        return result.toOwnedSlice(allocator);
+    }
+
+    pub fn getTransitiveDependencies(self: *const DependencyGraph, path: []const u8, allocator: std.mem.Allocator, max_depth: ?u32) ![]const []const u8 {
+        var visited = std.StringHashMap(void).init(allocator);
+        defer visited.deinit();
+
+        var queue: std.ArrayList(struct { path: []const u8, depth: u32 }) = .{};
+        defer queue.deinit(allocator);
+
+        try visited.put(path, {});
+        try queue.append(allocator, .{ .path = path, .depth = 0 });
+
+        var result: std.ArrayList([]const u8) = .{};
+        errdefer {
+            for (result.items) |p| allocator.free(p);
+            result.deinit(allocator);
+        }
+
+        var head: usize = 0;
+        while (head < queue.items.len) {
+            const item = queue.items[head];
+            head += 1;
+
+            const depth_limit = max_depth orelse std.math.maxInt(u32);
+            if (item.depth >= depth_limit) continue;
+
+            if (self.forward.get(item.path)) |fwd_deps| {
+                for (fwd_deps.items) |dep| {
+                    if (!visited.contains(dep)) {
+                        try visited.put(dep, {});
+                        const dep_copy = try allocator.dupe(u8, dep);
+                        try result.append(allocator, dep_copy);
+                        try queue.append(allocator, .{ .path = dep, .depth = item.depth + 1 });
+                    }
+                }
+            }
+        }
+
+        return result.toOwnedSlice(allocator);
+    }
+
+    pub fn count(self: *const DependencyGraph) usize {
+        return self.forward.count();
+    }
+
+    pub fn iterator(self: *const DependencyGraph) std.StringHashMap(std.ArrayList([]const u8)).Iterator {
+        return self.forward.iterator();
+    }
+
+    pub fn get(self: *const DependencyGraph, key: []const u8) ?std.ArrayList([]const u8) {
+        return self.forward.get(key);
+    }
+
+    pub fn keyIterator(self: *const DependencyGraph) std.StringHashMap(std.ArrayList([]const u8)).KeyIterator {
+        return self.forward.keyIterator();
+    }
+};
+
+pub const SymbolLocation = struct {
+    path: []const u8,
+    kind: SymbolKind,
+    line_start: u32,
+    line_end: u32,
+};
+
 pub const Explorer = struct {
     outlines: std.StringHashMap(FileOutline),
-    dep_graph: std.StringHashMap(std.ArrayList([]const u8)),
+    dep_graph: DependencyGraph,
     contents: std.StringHashMap([]const u8),
+    symbol_index: std.StringHashMap(std.ArrayList(SymbolLocation)),
     word_index: WordIndex,
     trigram_index: AnyTrigramIndex,
     sparse_ngram_index: SparseNgramIndex,
@@ -154,8 +396,9 @@ pub const Explorer = struct {
     pub fn init(allocator: std.mem.Allocator) Explorer {
         return .{
             .outlines = std.StringHashMap(FileOutline).init(allocator),
-            .dep_graph = std.StringHashMap(std.ArrayList([]const u8)).init(allocator),
+            .dep_graph = DependencyGraph.init(allocator),
             .contents = std.StringHashMap([]const u8).init(allocator),
+            .symbol_index = std.StringHashMap(std.ArrayList(SymbolLocation)).init(allocator),
             .word_index = WordIndex.init(allocator),
             .trigram_index = .{ .heap = TrigramIndex.init(allocator) },
             .sparse_ngram_index = SparseNgramIndex.init(allocator),
@@ -172,11 +415,13 @@ pub const Explorer = struct {
         }
         self.outlines.deinit();
 
-        var dep_iter = self.dep_graph.iterator();
-        while (dep_iter.next()) |entry| {
+        self.dep_graph.deinit();
+
+        var sym_iter = self.symbol_index.iterator();
+        while (sym_iter.next()) |entry| {
             entry.value_ptr.deinit(self.allocator);
         }
-        self.dep_graph.deinit();
+        self.symbol_index.deinit();
 
         var content_iter = self.contents.iterator();
         while (content_iter.next()) |entry| {
@@ -329,6 +574,7 @@ pub const Explorer = struct {
         }
 
         try self.rebuildDepsFor(stable_path, &persistent_outline);
+        self.rebuildSymbolIndexFor(stable_path, &persistent_outline);
 
         outline_gop.value_ptr.* = persistent_outline;
         if (should_cache) {
@@ -774,10 +1020,8 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
         } else {
             self.word_index_generation +%= 1;
         }
-        if (self.dep_graph.getPtr(path)) |deps| {
-            deps.deinit(self.allocator);
-            _ = self.dep_graph.remove(path);
-        }
+        self.dep_graph.remove(path);
+        self.removeSymbolIndexFor(path);
         if (self.contents.getPtr(path)) |content| {
             self.allocator.free(content.*);
             _ = self.contents.remove(path);
@@ -936,6 +1180,34 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
         self.mu.lockShared();
         defer self.mu.unlockShared();
 
+        // O(1) lookup via symbol_index
+        if (self.symbol_index.get(name)) |locs| {
+            if (locs.items.len > 0) {
+                const loc = locs.items[0];
+                // Fetch detail from outline
+                var detail: ?[]const u8 = null;
+                if (self.outlines.getPtr(loc.path)) |outline| {
+                    for (outline.symbols.items) |sym| {
+                        if (sym.line_start == loc.line_start and std.mem.eql(u8, sym.name, name)) {
+                            detail = if (sym.detail) |d| try allocator.dupe(u8, d) else null;
+                            break;
+                        }
+                    }
+                }
+                return .{
+                    .path = try allocator.dupe(u8, loc.path),
+                    .symbol = .{
+                        .name = try allocator.dupe(u8, name),
+                        .kind = loc.kind,
+                        .line_start = loc.line_start,
+                        .line_end = loc.line_end,
+                        .detail = detail,
+                    },
+                };
+            }
+        }
+
+        // Fallback: scan outlines (handles edge cases during index build)
         var iter = self.outlines.iterator();
         while (iter.next()) |entry| {
             for (entry.value_ptr.symbols.items) |sym| {
@@ -962,6 +1234,34 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
 
         var result_list: std.ArrayList(SymbolResult) = .{};
         errdefer result_list.deinit(allocator);
+
+        // O(1) lookup via symbol_index
+        if (self.symbol_index.get(name)) |locs| {
+            for (locs.items) |loc| {
+                var detail: ?[]const u8 = null;
+                if (self.outlines.getPtr(loc.path)) |outline| {
+                    for (outline.symbols.items) |sym| {
+                        if (sym.line_start == loc.line_start and std.mem.eql(u8, sym.name, name)) {
+                            detail = if (sym.detail) |d| try allocator.dupe(u8, d) else null;
+                            break;
+                        }
+                    }
+                }
+                try result_list.append(allocator, .{
+                    .path = try allocator.dupe(u8, loc.path),
+                    .symbol = .{
+                        .name = try allocator.dupe(u8, name),
+                        .kind = loc.kind,
+                        .line_start = loc.line_start,
+                        .line_end = loc.line_end,
+                        .detail = detail,
+                    },
+                });
+            }
+            return result_list.toOwnedSlice(allocator);
+        }
+
+        // Fallback: scan outlines
         var iter = self.outlines.iterator();
         while (iter.next()) |entry| {
             for (entry.value_ptr.symbols.items) |sym| {
@@ -989,63 +1289,125 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
         var result_list: std.ArrayList(SearchResult) = .{};
         errdefer result_list.deinit(allocator);
 
-        const sparse_paths = self.sparse_ngram_index.candidates(query, allocator);
-        defer if (sparse_paths) |sp| allocator.free(sp);
+        // Tier 0: word index direct lookup — O(1) hash lookup, no content scan.
+        const word_hits = self.word_index.search(query);
+        if (word_hits.len > 0 and word_hits.len <= max_results * 2) {
+            for (word_hits) |hit| {
+                const hit_path = self.word_index.hitPath(hit);
+                if (hit_path.len == 0) continue;
+                const cached = self.contents.get(hit_path) orelse continue;
+                const line_text = extractLineByNumber(cached, hit.line_num) orelse continue;
+                if (indexOfCaseInsensitive(line_text, query) == null) continue;
+                const duped_text = try allocator.dupe(u8, line_text);
+                errdefer allocator.free(duped_text);
+                const duped_path = try allocator.dupe(u8, hit_path);
+                errdefer allocator.free(duped_path);
+                try result_list.append(allocator, .{
+                    .path = duped_path,
+                    .line_num = hit.line_num,
+                    .line_text = duped_text,
+                });
+                if (result_list.items.len >= max_results) return result_list.toOwnedSlice(allocator);
+            }
+            if (result_list.items.len >= max_results)
+                return result_list.toOwnedSlice(allocator);
+        }
 
         const candidate_paths = self.trigram_index.candidates(query, allocator);
         defer if (candidate_paths) |cp| allocator.free(cp);
 
-        // Build unified candidate set: UNION of all index sources (#265).
-        // Previously sparse+trigram were intersected, dropping files that
-        // only appeared in one index.  Content verification in searchInContent
-        // already does exact matching, so false positives are harmless.
-        var all_candidates = std.StringHashMap(void).init(allocator);
-        defer all_candidates.deinit();
+        // Tier 1: trigram candidates — fast path without searched HashMap.
+        // If Tier 1 fills results, we skip HashMap allocation entirely.
+        if (candidate_paths) |cp| {
+            if (cp.len > 0) {
+                const SortCtx = struct {
+                    contents: *const std.StringHashMap([]const u8),
+                    pub fn lessThan(ctx: @This(), a: []const u8, b: []const u8) bool {
+                        const a_len = if (ctx.contents.get(a)) |c| c.len else std.math.maxInt(usize);
+                        const b_len = if (ctx.contents.get(b)) |c| c.len else std.math.maxInt(usize);
+                        return a_len < b_len;
+                    }
+                };
+                std.mem.sort([]const u8, @constCast(cp), SortCtx{ .contents = &self.contents }, SortCtx.lessThan);
 
-        if (candidate_paths) |cp| for (cp) |p| all_candidates.put(p, {}) catch {};
-        if (sparse_paths) |sp| for (sp) |p| all_candidates.put(p, {}) catch {};
-
-        // Interleave skip_trigram_files instead of tail-block (#266).
-        {
-            var skip_iter = self.skip_trigram_files.keyIterator();
-            while (skip_iter.next()) |key_ptr| all_candidates.put(key_ptr.*, {}) catch {};
+                const estimated_total = cp.len + self.skip_trigram_files.count();
+                const max_per_file = @max(@as(usize, 1), max_results / @max(@as(usize, 1), estimated_total));
+                for (cp) |path| {
+                    const ref = self.readContentForSearch(path, allocator) orelse continue;
+                    defer ref.deinit();
+                    try searchInContent(path, ref.data, query, allocator, max_per_file, max_results, &result_list);
+                    if (result_list.items.len >= max_results)
+                        return result_list.toOwnedSlice(allocator);
+                }
+            }
         }
 
-        const num_candidates = all_candidates.count();
+        // Only allocate searched HashMap if we need tiers 2-5.
+        var searched = std.StringHashMap(void).init(allocator);
+        defer searched.deinit();
+        // Mark all Tier 1 candidates as searched.
+        if (candidate_paths) |cp| {
+            for (cp) |p| searched.put(p, {}) catch {};
+        }
 
-        if (num_candidates > 0) {
-            // Per-file cap prevents one file from dominating results (#267).
-            const max_per_file = @max(@as(usize, 1), max_results / @max(@as(usize, 1), num_candidates));
+        // Tier 2: sparse candidates — LAZY, only computed when Tier 1 found nothing.
+        if (result_list.items.len == 0) {
+            const sparse_paths = self.sparse_ngram_index.candidates(query, allocator);
+            defer if (sparse_paths) |sp| allocator.free(sp);
+            if (sparse_paths) |sp| {
+                for (sp) |path| {
+                    if (searched.contains(path)) continue;
+                    const ref = self.readContentForSearch(path, allocator) orelse continue;
+                    defer ref.deinit();
+                    searched.put(path, {}) catch {};
+                    try searchInContent(path, ref.data, query, allocator, max_results, max_results, &result_list);
+                    if (result_list.items.len >= max_results) break;
+                }
+            }
+        }
 
-            var iter = all_candidates.keyIterator();
-            while (iter.next()) |key_ptr| {
+        // Tier 3: skip_trigram_files not already searched.
+        if (result_list.items.len < max_results) {
+            var skip_iter = self.skip_trigram_files.keyIterator();
+            while (skip_iter.next()) |key_ptr| {
+                if (searched.contains(key_ptr.*)) continue;
                 const ref = self.readContentForSearch(key_ptr.*, allocator) orelse continue;
                 defer ref.deinit();
-                try searchInContent(key_ptr.*, ref.data, query, allocator, max_per_file, max_results, &result_list);
+                searched.put(key_ptr.*, {}) catch {};
+                try searchInContent(key_ptr.*, ref.data, query, allocator, max_results, max_results, &result_list);
                 if (result_list.items.len >= max_results) break;
             }
-        } else {
-            // No trigram/sparse/skip_trigram candidates — use word_index to narrow (#250)
-            const word_hits = self.word_index.search(query);
-            if (word_hits.len > 0) {
+        }
+
+        // Tier 4: word index scan — for files not yet searched.
+        if (result_list.items.len < max_results) {
+            const tier4_hits = self.word_index.search(query);
+            if (tier4_hits.len > 0) {
                 var word_paths = std.StringHashMap(void).init(allocator);
                 defer word_paths.deinit();
-                for (word_hits) |hit| word_paths.put(self.word_index.hitPath(hit), {}) catch {};
+                for (tier4_hits) |hit| word_paths.put(self.word_index.hitPath(hit), {}) catch {};
                 var wp_iter = word_paths.keyIterator();
                 while (wp_iter.next()) |key_ptr| {
+                    if (searched.contains(key_ptr.*)) continue;
                     const ref = self.readContentForSearch(key_ptr.*, allocator) orelse continue;
                     defer ref.deinit();
+                    searched.put(key_ptr.*, {}) catch {};
                     try searchInContent(key_ptr.*, ref.data, query, allocator, max_results, max_results, &result_list);
                     if (result_list.items.len >= max_results) break;
                 }
-            } else {
-                var iter = self.outlines.keyIterator();
-                while (iter.next()) |key_ptr| {
-                    const ref = self.readContentForSearch(key_ptr.*, allocator) orelse continue;
-                    defer ref.deinit();
-                    try searchInContent(key_ptr.*, ref.data, query, allocator, max_results, max_results, &result_list);
-                    if (result_list.items.len >= max_results) break;
-                }
+            }
+        }
+
+        // Tier 5: full scan fallback — only when NO results from any tier.
+        // Avoids 100ms+ scans on large repos when indices already found matches.
+        if (result_list.items.len == 0) {
+            var iter = self.outlines.keyIterator();
+            while (iter.next()) |key_ptr| {
+                if (searched.contains(key_ptr.*)) continue;
+                const ref = self.readContentForSearch(key_ptr.*, allocator) orelse continue;
+                defer ref.deinit();
+                try searchInContent(key_ptr.*, ref.data, query, allocator, max_results, max_results, &result_list);
+                if (result_list.items.len >= max_results) break;
             }
         }
 
@@ -1203,28 +1565,19 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
     pub fn getImportedBy(self: *Explorer, path: []const u8, allocator: std.mem.Allocator) ![]const []const u8 {
         self.mu.lockShared();
         defer self.mu.unlockShared();
+        return self.dep_graph.getImportedBy(path, allocator);
+    }
 
-        // Extract basename for matching against raw import strings
-        // e.g., "src/store.zig" -> "store.zig"
-        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |pos| path[pos + 1 ..] else path;
+    pub fn getTransitiveDependents(self: *Explorer, path: []const u8, allocator: std.mem.Allocator, max_depth: ?u32) ![]const []const u8 {
+        self.mu.lockShared();
+        defer self.mu.unlockShared();
+        return self.dep_graph.getTransitiveDependents(path, allocator, max_depth);
+    }
 
-        var result: std.ArrayList([]const u8) = .{};
-        errdefer {
-            for (result.items) |p| allocator.free(p);
-            result.deinit(allocator);
-        }
-
-        var iter = self.dep_graph.iterator();
-        while (iter.next()) |entry| {
-            for (entry.value_ptr.items) |dep| {
-                if (std.mem.eql(u8, dep, path) or std.mem.eql(u8, dep, basename)) {
-                    const dep_path = try allocator.dupe(u8, entry.key_ptr.*);
-                    try result.append(allocator, dep_path);
-                    break;
-                }
-            }
-        }
-        return result.toOwnedSlice(allocator);
+    pub fn getTransitiveDependencies(self: *Explorer, path: []const u8, allocator: std.mem.Allocator, max_depth: ?u32) ![]const []const u8 {
+        self.mu.lockShared();
+        defer self.mu.unlockShared();
+        return self.dep_graph.getTransitiveDependencies(path, allocator, max_depth);
     }
 
     pub fn getHotFiles(self: *Explorer, store: *Store, allocator: std.mem.Allocator, limit: usize) ![]const []const u8 {
@@ -2090,19 +2443,52 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
         errdefer deps.deinit(self.allocator);
 
         for (outline.imports.items) |imp| {
-            // Skip imports with path traversal sequences
             if (std.mem.indexOf(u8, imp, "..") != null) continue;
             try deps.append(self.allocator, imp);
         }
 
-        const gop = try self.dep_graph.getOrPut(path);
-        if (gop.found_existing) {
-            var old = gop.value_ptr.*;
-            gop.value_ptr.* = deps;
-            old.deinit(self.allocator);
-        } else {
-            gop.key_ptr.* = path;
-            gop.value_ptr.* = deps;
+        try self.dep_graph.setDeps(path, deps);
+    }
+
+    fn rebuildSymbolIndexFor(self: *Explorer, path: []const u8, outline: *FileOutline) void {
+        self.removeSymbolIndexFor(path);
+        for (outline.symbols.items) |sym| {
+            if (sym.kind == .import or sym.kind == .comment_block) continue;
+            const gop = self.symbol_index.getOrPut(sym.name) catch continue;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(SymbolLocation){};
+            }
+            gop.value_ptr.append(self.allocator, .{
+                .path = path,
+                .kind = sym.kind,
+                .line_start = sym.line_start,
+                .line_end = sym.line_end,
+            }) catch {};
+        }
+    }
+
+    fn removeSymbolIndexFor(self: *Explorer, path: []const u8) void {
+        var to_remove: std.ArrayList([]const u8) = .{};
+        defer to_remove.deinit(self.allocator);
+
+        var iter = self.symbol_index.iterator();
+        while (iter.next()) |entry| {
+            var list = entry.value_ptr;
+            var i: usize = 0;
+            while (i < list.items.len) {
+                if (std.mem.eql(u8, list.items[i].path, path)) {
+                    _ = list.orderedRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+            if (list.items.len == 0) {
+                list.deinit(self.allocator);
+                to_remove.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+        for (to_remove.items) |key| {
+            _ = self.symbol_index.remove(key);
         }
     }
 
@@ -2120,31 +2506,45 @@ pub fn parseContentForIndexing(allocator: std.mem.Allocator, path: []const u8, c
     /// Must be called while holding at least a shared lock.
     fn findEnclosingSymbolLocked(self: *Explorer, path: []const u8, line_num: u32) ?Symbol {
         const outline = self.outlines.getPtr(path) orelse return null;
+        const symbols = outline.symbols.items;
+        if (symbols.len == 0) return null;
+
+        // Binary search: find rightmost symbol with line_start <= line_num.
+        // Symbols are stored in source order (line_start ascending).
+        var lo: usize = 0;
+        var hi: usize = symbols.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (symbols[mid].line_start <= line_num) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        // lo is the insertion point; candidates are symbols[0..lo] with line_start <= line_num.
+
+        // Check candidates in reverse for tightest enclosing (line_end >= line_num).
         var best: ?Symbol = null;
         var best_span: u32 = std.math.maxInt(u32);
-        for (outline.symbols.items) |sym| {
-            if (sym.line_start <= line_num and sym.line_end >= line_num) {
+        var i: usize = lo;
+        while (i > 0) {
+            i -= 1;
+            const sym = symbols[i];
+            if (sym.line_end >= line_num) {
                 const span = sym.line_end - sym.line_start;
                 if (span < best_span) {
                     best = sym;
                     best_span = span;
                 }
             }
+            // Once we're past a reasonable gap, stop scanning backwards
+            if (line_num - sym.line_start > 500 and best != null) break;
         }
         if (best != null) return best;
-        // Fallback: nearest preceding symbol
-        var nearest: ?Symbol = null;
-        var nearest_dist: u32 = std.math.maxInt(u32);
-        for (outline.symbols.items) |sym| {
-            if (sym.line_start <= line_num) {
-                const dist = line_num - sym.line_start;
-                if (dist < nearest_dist) {
-                    nearest = sym;
-                    nearest_dist = dist;
-                }
-            }
-        }
-        return nearest;
+
+        // Fallback: nearest preceding symbol (already at the right position from binary search)
+        if (lo > 0) return symbols[lo - 1];
+        return null;
     }
 
     pub const ScopedSearchResult = struct {
@@ -2330,25 +2730,149 @@ pub fn isCommentOrBlank(line: []const u8, language: Language) bool {
 }
 
 fn searchInContent(path: []const u8, content: []const u8, query: []const u8, allocator: std.mem.Allocator, max_per_file: usize, max_results: usize, result_list: *std.ArrayList(SearchResult)) !void {
-    var line_num: u32 = 0;
+    if (query.len == 0 or content.len == 0) return;
+    result_list.ensureTotalCapacity(allocator, result_list.items.len + @min(max_per_file, 16)) catch {};
+    const first_lower: u8 = if (query[0] >= 'A' and query[0] <= 'Z') query[0] + 32 else query[0];
+    const first_upper: u8 = if (query[0] >= 'a' and query[0] <= 'z') query[0] - 32 else query[0];
     var file_hits: usize = 0;
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        line_num += 1;
-        if (indexOfCaseInsensitive(line, query) != null) {
-            const line_text = try allocator.dupe(u8, line);
+    var pos: usize = 0;
+    const end = content.len - query.len + 1;
+
+    // Track line number incrementally.
+    var current_line: u32 = 1;
+    var current_line_start: usize = 0;
+
+    // SIMD constants — 16-byte NEON/SSE vectors.
+    const VW = 16;
+    const Vec = @Vector(VW, u8);
+    const splat_lo: Vec = @splat(first_lower);
+    const splat_hi: Vec = @splat(first_upper);
+
+    while (pos < end) {
+        // ── SIMD path: process full 16-byte chunks ──
+        if (pos + VW <= end) {
+            const chunk: Vec = content[pos..][0..VW].*;
+            const eq_lo: @Vector(VW, u1) = @bitCast(chunk == splat_lo);
+            const eq_hi: @Vector(VW, u1) = @bitCast(chunk == splat_hi);
+            var mask: u16 = @bitCast(eq_lo | eq_hi);
+
+            if (mask == 0) {
+                pos += VW;
+                continue;
+            }
+
+            // Process ALL first-byte candidates in this chunk without reloading.
+            var found_match = false;
+            while (mask != 0) {
+                const offset: usize = @ctz(mask);
+                const cand = pos + offset;
+                if (cand >= end) break;
+
+                if (matchAtCaseInsensitive(content, cand, query)) {
+                    // ── Match found ──
+                    while (current_line_start < cand) {
+                        if (simdIndexOfNewline(content, current_line_start)) |nl| {
+                            if (nl < cand) { current_line += 1; current_line_start = nl + 1; } else break;
+                        } else break;
+                    }
+                    const line_start = current_line_start;
+                    const line_end = simdIndexOfNewline(content, cand) orelse content.len;
+
+                    const line_text = try allocator.dupe(u8, content[line_start..line_end]);
+                    errdefer allocator.free(line_text);
+                    const path_copy = try allocator.dupe(u8, path);
+                    errdefer allocator.free(path_copy);
+                    try result_list.append(allocator, .{ .path = path_copy, .line_num = current_line, .line_text = line_text });
+                    file_hits += 1;
+                    if (file_hits >= max_per_file or result_list.items.len >= max_results) return;
+
+                    current_line += 1;
+                    current_line_start = line_end + 1;
+                    pos = line_end + 1;
+                    found_match = true;
+                    break; // restart outer loop from new line
+                }
+                mask &= mask - 1; // clear lowest bit, try next candidate in chunk
+            }
+            if (!found_match) pos += VW; // all candidates were false positives
+            continue;
+        }
+
+        // ── Scalar tail for last <16 bytes ──
+        const c = content[pos];
+        if ((c == first_lower or c == first_upper) and matchAtCaseInsensitive(content, pos, query)) {
+            while (current_line_start < pos) {
+                if (simdIndexOfNewline(content, current_line_start)) |nl| {
+                    if (nl < pos) { current_line += 1; current_line_start = nl + 1; } else break;
+                } else break;
+            }
+            const line_start = current_line_start;
+            const line_end = simdIndexOfNewline(content, pos) orelse content.len;
+
+            const line_text = try allocator.dupe(u8, content[line_start..line_end]);
             errdefer allocator.free(line_text);
             const path_copy = try allocator.dupe(u8, path);
             errdefer allocator.free(path_copy);
-            try result_list.append(allocator, .{
-                .path = path_copy,
-                .line_num = line_num,
-                .line_text = line_text,
-            });
+            try result_list.append(allocator, .{ .path = path_copy, .line_num = current_line, .line_text = line_text });
             file_hits += 1;
             if (file_hits >= max_per_file or result_list.items.len >= max_results) return;
+
+            current_line += 1;
+            current_line_start = line_end + 1;
+            pos = line_end + 1;
+            continue;
+        }
+        pos += 1;
+    }
+}
+
+/// SIMD-accelerated newline search from `start` in `content`.
+/// Returns index of first '\n' at or after `start`, or null.
+inline fn simdIndexOfNewline(content: []const u8, start: usize) ?usize {
+    const VW = 16;
+    const Vec = @Vector(VW, u8);
+    const splat_nl: Vec = @splat('\n');
+    var pos = start;
+
+    while (pos + VW <= content.len) {
+        const chunk: Vec = content[pos..][0..VW].*;
+        const eq: @Vector(VW, u1) = @bitCast(chunk == splat_nl);
+        const mask: u16 = @bitCast(eq);
+        if (mask != 0) return pos + @ctz(mask);
+        pos += VW;
+    }
+    while (pos < content.len) {
+        if (content[pos] == '\n') return pos;
+        pos += 1;
+    }
+    return null;
+}
+
+
+
+fn extractLineByNumber(content: []const u8, target_line: u32) ?[]const u8 {
+    if (target_line == 0) return null;
+    var line_num: u32 = 1;
+    var start: usize = 0;
+    for (content, 0..) |c, i| {
+        if (c == '\n') {
+            if (line_num == target_line) return content[start..i];
+            line_num += 1;
+            start = i + 1;
         }
     }
+    if (line_num == target_line and start <= content.len) return content[start..];
+    return null;
+}
+
+fn matchAtCaseInsensitive(content: []const u8, pos: usize, query: []const u8) bool {
+    if (pos + query.len > content.len) return false;
+    for (0..query.len) |j| {
+        const hc = if (content[pos + j] >= 'A' and content[pos + j] <= 'Z') content[pos + j] + 32 else content[pos + j];
+        const nc = if (query[j] >= 'A' and query[j] <= 'Z') query[j] + 32 else query[j];
+        if (hc != nc) return false;
+    }
+    return true;
 }
 
 fn searchInContentRegex(path: []const u8, content: []const u8, pattern: []const u8, allocator: std.mem.Allocator, max_results: usize, result_list: *std.ArrayList(SearchResult)) !void {
@@ -2681,9 +3205,32 @@ fn matchElement(c: u8, pattern: []const u8, start: usize, end: usize) bool {
 fn indexOfCaseInsensitive(haystack: []const u8, needle: []const u8) ?usize {
     if (needle.len == 0) return 0;
     if (needle.len > haystack.len) return null;
-    for (0..haystack.len - needle.len + 1) |i| {
+
+    // Pre-compute lowered first byte + second byte for fast skip.
+    const first_lower: u8 = if (needle[0] >= 'A' and needle[0] <= 'Z') needle[0] + 32 else needle[0];
+    const first_upper: u8 = if (needle[0] >= 'a' and needle[0] <= 'z') needle[0] - 32 else needle[0];
+    const end = haystack.len - needle.len + 1;
+
+    if (needle.len == 1) {
+        // Single-char: use std.mem.indexOfAny for speed.
+        const chars = [2]u8{ first_lower, first_upper };
+        return std.mem.indexOfAny(u8, haystack, &chars);
+    }
+
+    const second_lower: u8 = if (needle[1] >= 'A' and needle[1] <= 'Z') needle[1] + 32 else needle[1];
+
+    var i: usize = 0;
+    while (i < end) : (i += 1) {
+        // Fast reject: check first byte, then second byte before full compare.
+        const c0 = haystack[i];
+        if (c0 != first_lower and c0 != first_upper) continue;
+        const c1 = haystack[i + 1];
+        const c1_lower = if (c1 >= 'A' and c1 <= 'Z') c1 + 32 else c1;
+        if (c1_lower != second_lower) continue;
+
+        // First two bytes match — verify the rest.
         var match = true;
-        for (0..needle.len) |j| {
+        for (2..needle.len) |j| {
             const hc = if (haystack[i + j] >= 'A' and haystack[i + j] <= 'Z') haystack[i + j] + 32 else haystack[i + j];
             const nc = if (needle[j] >= 'A' and needle[j] <= 'Z') needle[j] + 32 else needle[j];
             if (hc != nc) {

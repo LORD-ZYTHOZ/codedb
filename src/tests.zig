@@ -29,6 +29,8 @@ const extractLines = explore.extractLines;
 const isCommentOrBlank = explore.isCommentOrBlank;
 const Language = explore.Language;
 const SymbolKind = explore.SymbolKind;
+const DependencyGraph = explore.DependencyGraph;
+const SymbolLocation = explore.SymbolLocation;
 const mcp_mod = @import("mcp.zig");
 const main_mod = @import("main.zig");
 const nuke_mod = @import("nuke.zig");
@@ -6196,4 +6198,342 @@ test "issue-264: early exit at max_results misses valid matches in remaining can
         if (std.mem.eql(u8, r.path, "quiet.zig")) found_quiet = true;
     }
     try testing.expect(found_quiet);
+}
+
+// ── DependencyGraph tests ──────────────────────────────────
+
+test "dep-graph: reverse index gives O(1) imported_by lookup" {
+    var graph = DependencyGraph.init(testing.allocator);
+    defer graph.deinit();
+
+    // main.zig imports store.zig and utils.zig
+    var deps1: std.ArrayList([]const u8) = .{};
+    try deps1.append(testing.allocator, "store.zig");
+    try deps1.append(testing.allocator, "utils.zig");
+    try graph.setDeps("main.zig", deps1);
+
+    // server.zig imports store.zig
+    var deps2: std.ArrayList([]const u8) = .{};
+    try deps2.append(testing.allocator, "store.zig");
+    try graph.setDeps("server.zig", deps2);
+
+    // store.zig is imported by main.zig and server.zig
+    const imported_by = try graph.getImportedBy("store.zig", testing.allocator);
+    defer {
+        for (imported_by) |p| testing.allocator.free(p);
+        testing.allocator.free(imported_by);
+    }
+    try testing.expectEqual(@as(usize, 2), imported_by.len);
+
+    // utils.zig is imported by main.zig only
+    const imported_by2 = try graph.getImportedBy("utils.zig", testing.allocator);
+    defer {
+        for (imported_by2) |p| testing.allocator.free(p);
+        testing.allocator.free(imported_by2);
+    }
+    try testing.expectEqual(@as(usize, 1), imported_by2.len);
+    try testing.expectEqualStrings("main.zig", imported_by2[0]);
+}
+
+test "dep-graph: setDeps removes old reverse edges" {
+    var graph = DependencyGraph.init(testing.allocator);
+    defer graph.deinit();
+
+    // main.zig initially imports store.zig
+    var deps1: std.ArrayList([]const u8) = .{};
+    try deps1.append(testing.allocator, "store.zig");
+    try graph.setDeps("main.zig", deps1);
+
+    const before = try graph.getImportedBy("store.zig", testing.allocator);
+    defer {
+        for (before) |p| testing.allocator.free(p);
+        testing.allocator.free(before);
+    }
+    try testing.expectEqual(@as(usize, 1), before.len);
+
+    // main.zig re-indexed, now imports utils.zig instead
+    var deps2: std.ArrayList([]const u8) = .{};
+    try deps2.append(testing.allocator, "utils.zig");
+    try graph.setDeps("main.zig", deps2);
+
+    // store.zig should no longer have main.zig as a dependent
+    const after = try graph.getImportedBy("store.zig", testing.allocator);
+    defer {
+        for (after) |p| testing.allocator.free(p);
+        testing.allocator.free(after);
+    }
+    try testing.expectEqual(@as(usize, 0), after.len);
+
+    // utils.zig should now have main.zig
+    const utils_deps = try graph.getImportedBy("utils.zig", testing.allocator);
+    defer {
+        for (utils_deps) |p| testing.allocator.free(p);
+        testing.allocator.free(utils_deps);
+    }
+    try testing.expectEqual(@as(usize, 1), utils_deps.len);
+}
+
+test "dep-graph: transitive dependents via BFS" {
+    var graph = DependencyGraph.init(testing.allocator);
+    defer graph.deinit();
+
+    // Build chain: app.zig -> server.zig -> store.zig -> utils.zig
+    var deps1: std.ArrayList([]const u8) = .{};
+    try deps1.append(testing.allocator, "server.zig");
+    try graph.setDeps("app.zig", deps1);
+
+    var deps2: std.ArrayList([]const u8) = .{};
+    try deps2.append(testing.allocator, "store.zig");
+    try graph.setDeps("server.zig", deps2);
+
+    var deps3: std.ArrayList([]const u8) = .{};
+    try deps3.append(testing.allocator, "utils.zig");
+    try graph.setDeps("store.zig", deps3);
+
+    // Changing utils.zig affects store.zig, server.zig, app.zig transitively
+    const blast = try graph.getTransitiveDependents("utils.zig", testing.allocator, null);
+    defer {
+        for (blast) |p| testing.allocator.free(p);
+        testing.allocator.free(blast);
+    }
+    try testing.expectEqual(@as(usize, 3), blast.len);
+
+    // With max_depth=1, only direct dependents
+    const shallow = try graph.getTransitiveDependents("utils.zig", testing.allocator, 1);
+    defer {
+        for (shallow) |p| testing.allocator.free(p);
+        testing.allocator.free(shallow);
+    }
+    try testing.expectEqual(@as(usize, 1), shallow.len);
+    try testing.expectEqualStrings("store.zig", shallow[0]);
+}
+
+test "dep-graph: transitive dependencies (forward BFS)" {
+    var graph = DependencyGraph.init(testing.allocator);
+    defer graph.deinit();
+
+    // app.zig -> server.zig -> store.zig -> utils.zig
+    var deps1: std.ArrayList([]const u8) = .{};
+    try deps1.append(testing.allocator, "server.zig");
+    try graph.setDeps("app.zig", deps1);
+
+    var deps2: std.ArrayList([]const u8) = .{};
+    try deps2.append(testing.allocator, "store.zig");
+    try graph.setDeps("server.zig", deps2);
+
+    var deps3: std.ArrayList([]const u8) = .{};
+    try deps3.append(testing.allocator, "utils.zig");
+    try graph.setDeps("store.zig", deps3);
+
+    // app.zig transitively depends on server.zig, store.zig, utils.zig
+    const deps_all = try graph.getTransitiveDependencies("app.zig", testing.allocator, null);
+    defer {
+        for (deps_all) |p| testing.allocator.free(p);
+        testing.allocator.free(deps_all);
+    }
+    try testing.expectEqual(@as(usize, 3), deps_all.len);
+
+    // Depth=2: app.zig -> server.zig -> store.zig (not utils.zig)
+    const deps_shallow = try graph.getTransitiveDependencies("app.zig", testing.allocator, 2);
+    defer {
+        for (deps_shallow) |p| testing.allocator.free(p);
+        testing.allocator.free(deps_shallow);
+    }
+    try testing.expectEqual(@as(usize, 2), deps_shallow.len);
+}
+
+test "dep-graph: remove cleans forward and reverse edges" {
+    var graph = DependencyGraph.init(testing.allocator);
+    defer graph.deinit();
+
+    var deps1: std.ArrayList([]const u8) = .{};
+    try deps1.append(testing.allocator, "store.zig");
+    try graph.setDeps("main.zig", deps1);
+
+    var deps2: std.ArrayList([]const u8) = .{};
+    try deps2.append(testing.allocator, "store.zig");
+    try graph.setDeps("server.zig", deps2);
+
+    try testing.expectEqual(@as(usize, 2), graph.count());
+
+    // Remove main.zig
+    graph.remove("main.zig");
+    try testing.expectEqual(@as(usize, 1), graph.count());
+
+    // store.zig should only be imported by server.zig now
+    const imported_by = try graph.getImportedBy("store.zig", testing.allocator);
+    defer {
+        for (imported_by) |p| testing.allocator.free(p);
+        testing.allocator.free(imported_by);
+    }
+    try testing.expectEqual(@as(usize, 1), imported_by.len);
+    try testing.expectEqualStrings("server.zig", imported_by[0]);
+}
+
+test "dep-graph: cycle does not cause infinite BFS" {
+    var graph = DependencyGraph.init(testing.allocator);
+    defer graph.deinit();
+
+    // Create a cycle: a.zig -> b.zig -> c.zig -> a.zig
+    var deps1: std.ArrayList([]const u8) = .{};
+    try deps1.append(testing.allocator, "b.zig");
+    try graph.setDeps("a.zig", deps1);
+
+    var deps2: std.ArrayList([]const u8) = .{};
+    try deps2.append(testing.allocator, "c.zig");
+    try graph.setDeps("b.zig", deps2);
+
+    var deps3: std.ArrayList([]const u8) = .{};
+    try deps3.append(testing.allocator, "a.zig");
+    try graph.setDeps("c.zig", deps3);
+
+    // Transitive dependents of a.zig — should terminate despite cycle
+    const blast = try graph.getTransitiveDependents("a.zig", testing.allocator, null);
+    defer {
+        for (blast) |p| testing.allocator.free(p);
+        testing.allocator.free(blast);
+    }
+    // b.zig and c.zig both transitively depend on a.zig
+    try testing.expectEqual(@as(usize, 2), blast.len);
+
+    // Forward transitive deps from a.zig — should also terminate
+    const fwd = try graph.getTransitiveDependencies("a.zig", testing.allocator, null);
+    defer {
+        for (fwd) |p| testing.allocator.free(p);
+        testing.allocator.free(fwd);
+    }
+    try testing.expectEqual(@as(usize, 2), fwd.len);
+}
+
+test "dep-graph: Explorer integration — getImportedBy uses reverse index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var explorer = Explorer.init(arena.allocator());
+
+    try explorer.indexFile("store.zig", "pub const Store = struct {};");
+    try explorer.indexFile("main.zig", "const store = @import(\"store.zig\");\npub fn main() void {}");
+    try explorer.indexFile("server.zig", "const store = @import(\"store.zig\");\npub fn serve() void {}");
+
+    const deps = try explorer.getImportedBy("store.zig", testing.allocator);
+    defer {
+        for (deps) |d| testing.allocator.free(d);
+        testing.allocator.free(deps);
+    }
+    try testing.expectEqual(@as(usize, 2), deps.len);
+}
+
+test "dep-graph: Explorer transitive dependents" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var explorer = Explorer.init(arena.allocator());
+
+    try explorer.indexFile("utils.zig", "pub fn helper() void {}");
+    try explorer.indexFile("store.zig", "const utils = @import(\"utils.zig\");\npub const Store = struct {};");
+    try explorer.indexFile("main.zig", "const store = @import(\"store.zig\");\npub fn main() void {}");
+
+    // Transitive: changing utils.zig affects store.zig and main.zig
+    const blast = try explorer.getTransitiveDependents("utils.zig", testing.allocator, null);
+    defer {
+        for (blast) |b| testing.allocator.free(b);
+        testing.allocator.free(blast);
+    }
+    try testing.expectEqual(@as(usize, 2), blast.len);
+}
+
+// ── Symbol index tests ─────────────────────────────────────
+
+test "symbol-index: O(1) findSymbol via symbol_index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var explorer = Explorer.init(arena.allocator());
+
+    try explorer.indexFile("math.zig", "pub fn add(a: i32, b: i32) i32 { return a + b; }\npub fn subtract(a: i32, b: i32) i32 { return a - b; }\n");
+    try explorer.indexFile("utils.zig", "pub fn add(x: f64, y: f64) f64 { return x + y; }\npub fn format() void {}\n");
+
+    // findSymbol should return first match via index
+    const result = try explorer.findSymbol("add", testing.allocator);
+    try testing.expect(result != null);
+    const r = result.?;
+    defer {
+        testing.allocator.free(r.path);
+        testing.allocator.free(r.symbol.name);
+        if (r.symbol.detail) |d| testing.allocator.free(d);
+    }
+    try testing.expectEqualStrings("add", r.symbol.name);
+
+    // findAllSymbols should return both
+    const all = try explorer.findAllSymbols("add", testing.allocator);
+    defer {
+        for (all) |s| {
+            testing.allocator.free(s.path);
+            testing.allocator.free(s.symbol.name);
+            if (s.symbol.detail) |d| testing.allocator.free(d);
+        }
+        testing.allocator.free(all);
+    }
+    try testing.expectEqual(@as(usize, 2), all.len);
+}
+
+test "symbol-index: removeFile cleans symbol_index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var explorer = Explorer.init(arena.allocator());
+
+    try explorer.indexFile("a.zig", "pub fn unique_func() void {}");
+    const before = try explorer.findSymbol("unique_func", testing.allocator);
+    try testing.expect(before != null);
+    testing.allocator.free(before.?.path);
+    testing.allocator.free(before.?.symbol.name);
+
+    explorer.removeFile("a.zig");
+
+    const after = try explorer.findSymbol("unique_func", testing.allocator);
+    try testing.expect(after == null);
+}
+
+test "symbol-index: re-index updates symbol_index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var explorer = Explorer.init(arena.allocator());
+
+    try explorer.indexFile("a.zig", "pub fn old_name() void {}");
+    const r1 = try explorer.findSymbol("old_name", testing.allocator);
+    try testing.expect(r1 != null);
+    testing.allocator.free(r1.?.path);
+    testing.allocator.free(r1.?.symbol.name);
+
+    // Re-index same file with different content
+    try explorer.indexFile("a.zig", "pub fn new_name() void {}");
+    const r2 = try explorer.findSymbol("old_name", testing.allocator);
+    try testing.expect(r2 == null);
+
+    const r3 = try explorer.findSymbol("new_name", testing.allocator);
+    try testing.expect(r3 != null);
+    testing.allocator.free(r3.?.path);
+    testing.allocator.free(r3.?.symbol.name);
+}
+
+// ── searchInContent incremental line counting test ─────────
+
+test "search: line numbers correct with incremental counting" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var explorer = Explorer.init(arena.allocator());
+
+    // File with target on specific lines
+    const content = "line1\nline2\ntarget_here\nline4\nline5\ntarget_here\nline7\n";
+    try explorer.indexFile("test.zig", content);
+
+    const results = try explorer.searchContent("target_here", testing.allocator, 10);
+    defer {
+        for (results) |r| {
+            testing.allocator.free(r.path);
+            testing.allocator.free(r.line_text);
+        }
+        testing.allocator.free(results);
+    }
+
+    try testing.expectEqual(@as(usize, 2), results.len);
+    try testing.expectEqual(@as(u32, 3), results[0].line_num);
+    try testing.expectEqual(@as(u32, 6), results[1].line_num);
 }
