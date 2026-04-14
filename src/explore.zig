@@ -2357,27 +2357,23 @@ pub fn isCommentOrBlank(line: []const u8, language: Language) bool {
 fn searchInContent(path: []const u8, content: []const u8, query: []const u8, allocator: std.mem.Allocator, max_per_file: usize, max_results: usize, result_list: *std.ArrayList(SearchResult)) !void {
     if (query.len == 0 or content.len == 0) return;
 
-    // Scan the whole buffer for matches, extract line info only on hit.
     const first_lower: u8 = if (query[0] >= 'A' and query[0] <= 'Z') query[0] + 32 else query[0];
     const first_upper: u8 = if (query[0] >= 'a' and query[0] <= 'z') query[0] - 32 else query[0];
     var file_hits: usize = 0;
     var pos: usize = 0;
+    const end = content.len - query.len + 1;
 
-    while (pos + query.len <= content.len) {
-        // Fast first-byte scan to find potential match positions.
-        const c = content[pos];
-        if (c != first_lower and c != first_upper) {
-            pos += 1;
-            continue;
-        }
+    while (pos < end) {
+        // SIMD: scan 16 bytes at a time for the first byte.
+        pos = simdFindByte(content, pos, end, first_lower, first_upper);
+        if (pos >= end) break;
 
-        // Check if full query matches at this position.
         if (!matchAtCaseInsensitive(content, pos, query)) {
             pos += 1;
             continue;
         }
 
-        // Match found — extract line boundaries and line number.
+        // Match — extract line info.
         const line_start = if (std.mem.lastIndexOfScalar(u8, content[0..pos], '\n')) |nl| nl + 1 else 0;
         const line_end = if (std.mem.indexOfScalarPos(u8, content, pos, '\n')) |nl| nl else content.len;
         const line_num: u32 = @intCast(std.mem.count(u8, content[0..line_start], "\n") + 1);
@@ -2394,9 +2390,36 @@ fn searchInContent(path: []const u8, content: []const u8, query: []const u8, all
         file_hits += 1;
         if (file_hits >= max_per_file or result_list.items.len >= max_results) return;
 
-        // Skip to next line to avoid duplicate matches on the same line.
         pos = line_end + 1;
     }
+}
+
+const SIMD_WIDTH = 16;
+const SimdVec = @Vector(SIMD_WIDTH, u8);
+
+fn simdFindByte(content: []const u8, start: usize, end: usize, lower: u8, upper: u8) usize {
+    var pos = start;
+    const splat_lower: SimdVec = @splat(lower);
+    const splat_upper: SimdVec = @splat(upper);
+
+    // SIMD loop: 16 bytes per iteration
+    while (pos + SIMD_WIDTH <= end) {
+        const chunk: SimdVec = content[pos..][0..SIMD_WIDTH].*;
+        const eq_lower: @Vector(SIMD_WIDTH, u1) = @bitCast(chunk == splat_lower);
+        const eq_upper: @Vector(SIMD_WIDTH, u1) = @bitCast(chunk == splat_upper);
+        const mask: u16 = @bitCast(eq_lower | eq_upper);
+        if (mask != 0) {
+            return pos + @ctz(mask);
+        }
+        pos += SIMD_WIDTH;
+    }
+
+    // Scalar tail
+    while (pos < end) {
+        if (content[pos] == lower or content[pos] == upper) return pos;
+        pos += 1;
+    }
+    return end;
 }
 
 fn matchAtCaseInsensitive(content: []const u8, pos: usize, query: []const u8) bool {
