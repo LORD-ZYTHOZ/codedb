@@ -2699,17 +2699,16 @@ fn searchInContent(path: []const u8, content: []const u8, query: []const u8, all
     const first_upper: u8 = if (query[0] >= 'a' and query[0] <= 'z') query[0] - 32 else query[0];
     var file_hits: usize = 0;
     var pos: usize = 0;
+    const end = content.len - query.len + 1;
 
-    // Track line number incrementally — O(1) per match instead of O(pos).
+    // Track line number incrementally — O(gap) per match instead of O(pos).
     var current_line: u32 = 1;
     var current_line_start: usize = 0;
 
-    while (pos + query.len <= content.len) {
-        const c = content[pos];
-        if (c != first_lower and c != first_upper) {
-            pos += 1;
-            continue;
-        }
+    while (pos < end) {
+        // SIMD: scan 16 bytes at a time for the first byte.
+        pos = simdFindByte(content, pos, end, first_lower, first_upper);
+        if (pos >= end) break;
 
         if (!matchAtCaseInsensitive(content, pos, query)) {
             pos += 1;
@@ -2717,7 +2716,6 @@ fn searchInContent(path: []const u8, content: []const u8, query: []const u8, all
         }
 
         // Advance line counter from current_line_start to pos.
-        // Only counts newlines in the gap since last match — O(gap) not O(pos).
         while (current_line_start < pos) {
             if (std.mem.indexOfScalarPos(u8, content, current_line_start, '\n')) |nl| {
                 if (nl < pos) {
@@ -2747,6 +2745,34 @@ fn searchInContent(path: []const u8, content: []const u8, query: []const u8, all
         current_line_start = line_end + 1;
         pos = line_end + 1;
     }
+}
+
+const SIMD_WIDTH = 16;
+const SimdVec = @Vector(SIMD_WIDTH, u8);
+
+fn simdFindByte(content: []const u8, start: usize, end: usize, lower: u8, upper: u8) usize {
+    var pos = start;
+    const splat_lower: SimdVec = @splat(lower);
+    const splat_upper: SimdVec = @splat(upper);
+
+    // SIMD loop: 16 bytes per iteration
+    while (pos + SIMD_WIDTH <= end) {
+        const chunk: SimdVec = content[pos..][0..SIMD_WIDTH].*;
+        const eq_lower: @Vector(SIMD_WIDTH, u1) = @bitCast(chunk == splat_lower);
+        const eq_upper: @Vector(SIMD_WIDTH, u1) = @bitCast(chunk == splat_upper);
+        const mask: u16 = @bitCast(eq_lower | eq_upper);
+        if (mask != 0) {
+            return pos + @ctz(mask);
+        }
+        pos += SIMD_WIDTH;
+    }
+
+    // Scalar tail
+    while (pos < end) {
+        if (content[pos] == lower or content[pos] == upper) return pos;
+        pos += 1;
+    }
+    return end;
 }
 
 fn matchAtCaseInsensitive(content: []const u8, pos: usize, query: []const u8) bool {
